@@ -1,0 +1,8 @@
+# 291P Communication Overhead Tool - Dependencies
+# Run:  pip install -r requirements.txt
+#
+# Basic version uses only Python stdlib (no packages required).
+# Below: optional deps for extensions (uncomment if needed).
+#
+# numpy>=1.24.0
+# matplotlib>=3.7.0
