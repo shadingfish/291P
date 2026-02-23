@@ -77,20 +77,19 @@ PYTHONPATH=. python run_cli.py analysis --topology switch --num-gpus 8 --dp 8 --
 PYTHONPATH=. python run_cli.py analysis --topology switch --num-gpus 8 --dp 4 --tp 2 --params 70e9 --seq-length 1024 --hidden-size 4096
 ```
 
-### Checklist
-- [ ] `TopologyKind.SWITCH` added and `build_topology()` returns correct desc for SWITCH.
-- [ ] All five collectives (AllReduce, AllGather, ReduceScatter, Broadcast, All2All) have SWITCH formulas in collective.py.
-- [ ] **Each formula is written clearly in comments with source (e.g. PPT slide or paper).** REFERENCES.md has SWITCH entries.
-- [ ] `run_cli.py collective --topology switch --N 8 --M 140e9` runs without error.
-- [ ] `run_cli.py analysis --topology switch --num-gpus 8 --dp 8 --params 70e9` runs and reports DP AllReduce latency.
-- [ ] REFERENCES.md updated; list_cmds and run_all include switch.
 
 ---
 
 ## Task 2: MESH topology
 
 ### Goal
-Implement the **MESH** topology (2D grid: n_x × n_y = N) and latency/volume formulas for all collectives. Support optional mesh dimensions (e.g. `--mesh-nx`, `--mesh-ny`) if needed. Ensure analysis mode supports `--topology mesh` for DP/TP/CP. Provide cmdline examples.
+Implement the **MESH** topology (2D grid: n_x × n_y = ### Checklist
+- [T] `TopologyKind.SWITCH` added and `build_topology()` returns correct desc for SWITCH.
+- [T] All five collectives (AllReduce, AllGather, ReduceScatter, Broadcast, All2All) have SWITCH formulas in collective.py.
+- [T] **Each formula is written clearly in comments with source (e.g. PPT slide or paper).** REFERENCES.md has SWITCH entries.
+- [T] `run_cli.py collective --topology switch --N 8 --M 140e9` runs without error.
+- [T] `run_cli.py analysis --topology switch --num-gpus 8 --dp 8 --params 70e9` runs and reports DP AllReduce latency.
+- [T] REFERENCES.md updated; list_cmds and run_all include switch.
 
 ### Implementation steps
 1. **Topology**
