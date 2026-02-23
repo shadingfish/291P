@@ -37,6 +37,7 @@ class TopologyKind(str, Enum):
     RING = "ring"
     TREE = "tree"
     HIERARCHICAL = "hierarchical"
+    SWITCH = "switch"
 
 
 @dataclass
@@ -108,9 +109,16 @@ def build_topology(
             alpha2=alpha2 if alpha2 is not None else LATENCY_INFINIBAND_S,
             gpus_per_node=gpus_per_node,
         )
-    else:
+    elif kind == TopologyKind.RING :
         desc = TopologyDesc(
             kind=kind,
+            N=N,
+            B=B if B is not None else BANDWIDTH_NVLINK_BPS,
+            alpha=alpha if alpha is not None else LATENCY_NVLINK_S,
+        )
+    else:
+        return TopologyDesc(
+            kind=TopologyKind.SWITCH,
             N=N,
             B=B if B is not None else BANDWIDTH_NVLINK_BPS,
             alpha=alpha if alpha is not None else LATENCY_NVLINK_S,
