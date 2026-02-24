@@ -12,11 +12,11 @@ SUPPORTED COMBINATIONS (collective_kind x topology_kind)
 -----------------------------------------------------------------------------
   Implemented:
                             RING    TREE    HIERARCHICAL(RING ONLY)   SWITCH   MESH   TORUS
-  ALL_REDUCE                 yes    yes* yes            yes      TBD    TBD
-  ALL_GATHER                 yes    no** yes             yes      TBD    TBD
-  REDUCE_SCATTER             yes    no** yes             yes      TBD    TBD
-  BROADCAST                  yes    no** yes             yes      TBD    TBD
-  ALL_TO_ALL                 yes    no** yes***          yes      TBD    TBD
+  ALL_REDUCE                 yes    yes*    yes            yes      TBD    TBD
+  ALL_GATHER                 yes    no**    yes            yes      TBD    TBD
+  REDUCE_SCATTER             yes    no**    yes            yes      TBD    TBD
+  BROADCAST                  yes    no**    yes            yes      TBD    TBD
+  ALL_TO_ALL                 yes    no**    yes***         yes      TBD    TBD
 
   * TREE: AllReduce uses tree algorithm. Other collectives use ring-style formula.
   ** TREE + non-AllReduce: ring-style formula (B, alpha), no dedicated tree algo.
