@@ -12,11 +12,11 @@ SUPPORTED COMBINATIONS (collective_kind x topology_kind)
 -----------------------------------------------------------------------------
   Implemented:
                             RING    TREE    HIERARCHICAL(RING ONLY)   SWITCH   MESH   TORUS
-  ALL_REDUCE                 yes    yes*    yes            TBD      TBD    TBD
-  ALL_GATHER                 yes    no**    yes             TBD      TBD    TBD
-  REDUCE_SCATTER             yes    no**    yes             TBD      TBD    TBD
-  BROADCAST                  yes    no**    yes             TBD      TBD    TBD
-  ALL_TO_ALL                 yes    no**    yes***          TBD      TBD    TBD
+  ALL_REDUCE                 yes    yes*    yes            yes      TBD    TBD
+  ALL_GATHER                 yes    no**    yes            yes      TBD    TBD
+  REDUCE_SCATTER             yes    no**    yes            yes      TBD    TBD
+  BROADCAST                  yes    no**    yes            yes      TBD    TBD
+  ALL_TO_ALL                 yes    no**    yes***         yes      TBD    TBD
 
   * TREE: AllReduce uses tree algorithm. Other collectives use ring-style formula.
   ** TREE + non-AllReduce: ring-style formula (B, alpha), no dedicated tree algo.
@@ -158,6 +158,57 @@ def _tree_allreduce_flat(M: float, N: int, B: float, alpha: float) -> Tuple[floa
     return latency, volume_per_gpu, steps
 
 
+def _switch_flat_model(M: float, N: int, B: float, alpha: float, kind: str) -> Tuple[float, float, int]:
+    """
+    Switch Topology: Ideal Full-Bisection Non-blocking Model.
+
+    Assumes a centralized switch where every GPU has a dedicated link of bandwidth B.
+    Communication is modeled based on logical phases rather than hop-by-hop forwarding.
+
+    Parameters (inputs):
+        M: Total tensor size in bytes.
+        N: Number of GPUs connected to the switch.
+        B: Link bandwidth per GPU in bytes per second.
+        alpha: Per-step (round-trip/handshake) latency in seconds.
+        kind: The collective operation type (string value of CollectiveKind).
+
+    Formulas:
+        - AllReduce: 2 logical steps (Reduce-to-Root + Broadcast).
+          latency = 2 * (M/B + alpha).
+        - All2All: N-1 steps to handle distinct chunks for each peer.
+          latency = M/B + (N-1) * alpha.
+        - Others (AG/RS/Broadcast): 1 logical step of parallel transfer.
+          latency = M/B + alpha.
+
+    Source: Idealized Full-Bisection Model (Task 1 Specification).
+    """
+    if N <= 1:
+        return 0.0, 0.0, 0
+
+    if kind == "all_reduce":
+        # Two logical phases: aggregate to switch/root, then distribute.
+        # Formula: latency = 2 * (M/B + alpha)
+        # Source: NCCL Star-Algorithm Model; aligns with L4 Slide 43 (Low Latency Strength).
+        steps = 2
+        latency = 2 * (M / B + alpha)
+        # Volume: 2 * (N-1)/N * M to align with Ring cargo definitions.
+        volume = 2 * ((N - 1) / N) * M
+    elif kind == "all_to_all":
+        # Each GPU logically serializes connection overhead for N-1 peers.
+        # Formula: latency = M/B + (N-1) * alpha
+        # Source: DeepSpeed-Ulysses: System Optimizations for Enabling Training of Extremely Long Sequence Transformers" (2023
+        steps = N - 1
+        latency = (M / B) + (N - 1) * alpha
+        volume = 2 * ((N - 1) / N) * M
+    else:
+        # AllGather, ReduceScatter, and Broadcast take 1 parallel round.
+        # Thakur et al. "Optimization of Collective Communication Operations in MPICH." (2005)
+        steps = 1
+        latency = (M / B) + alpha
+        volume = ((N - 1) / N) * M
+
+    return latency, volume, steps
+
 def _ring_allgather_or_reducescatter_flat(M: float, N: int, B: float, alpha: float) -> Tuple[float, float, int]:
     """
     Ring AllGather or ReduceScatter: (N-1) steps, each step moves M/N bytes.
@@ -177,7 +228,6 @@ def _ring_allgather_or_reducescatter_flat(M: float, N: int, B: float, alpha: flo
     latency = steps * time_per_step
     volume_per_gpu = (N - 1) * (M / N)
     return latency, volume_per_gpu, steps
-
 
 def _hierarchical_ring_allreduce(
     M: float,
@@ -294,6 +344,20 @@ def _print_hierarchical_ag_rs(
     print(f"  [Result] intra_latency = {intra:.4e} s, inter_latency = {inter:.4e} s, total = {lat:.4e} s ({lat*1000:.2f} ms)")
 
 
+def _print_switch_info(kind: str, M: float, N: int, B: float, alpha: float, lat: float, st: int) -> None:
+    """Print Switch Ideal model formula and calculation."""
+    print(f"  [Formula] Switch {kind.capitalize()} (Ideal Full-Bisection Model)")
+    print(f"  [Input]   N={N}, M={M:.2e} B, B={B:.2e} B/s, alpha={alpha:.2e} s")
+
+    if kind == "all_reduce":
+        print(f"  [Step]    steps = 2 (Reduce + Broadcast); latency = 2 * (M/B + alpha)")
+    elif kind == "all_to_all":
+        print(f"  [Step]    steps = N-1 ({N - 1}); latency = M/B + (N-1)*alpha")
+    else:
+        print(f"  [Step]    steps = 1; latency = M/B + alpha")
+
+    print(f"  [Result]  latency = {lat:.4e} s ({lat * 1000:.2f} ms)")
+
 def collective_latency_and_volume(
     kind: CollectiveKind,
     M: float,
@@ -388,6 +452,11 @@ def collective_latency_and_volume(
             if verbose:
                 _print_tree_allreduce(M, N, B, alpha, lat, st)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
+        elif topology.kind == TopologyKind.SWITCH:
+            lat, vol, st = _switch_flat_model(M, N, B, alpha, kind.value)
+            if verbose:
+                _print_switch_info(kind.value, M, N, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         else:
             lat, vol, st = _ring_allreduce_flat(M, N, B, alpha)
             if verbose:
@@ -402,6 +471,11 @@ def collective_latency_and_volume(
             if verbose:
                 _print_hierarchical_ag_rs(M, N, B1, alpha1, B2, alpha2, gpus_per_node, intra, inter, lat)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st, intra_latency_s=intra, inter_latency_s=inter)
+        elif topology.kind == TopologyKind.SWITCH:
+            lat, vol, st = _switch_flat_model(M, N, B, alpha, kind.value)
+            if verbose:
+                _print_switch_info(kind.value, M, N, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         else:
             lat, vol, st = _ring_allgather_or_reducescatter_flat(M, N, B, alpha)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
@@ -412,11 +486,21 @@ def collective_latency_and_volume(
                 M, N, B1, alpha1, B2, alpha2, gpus_per_node
             )
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st, intra_latency_s=intra, inter_latency_s=inter)
+        elif topology.kind == TopologyKind.SWITCH:
+            lat, vol, st = _switch_flat_model(M, N, B, alpha, kind.value)
+            if verbose:
+                _print_switch_info(kind.value, M, N, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         else:
             lat, vol, st = _ring_allgather_or_reducescatter_flat(M, N, B, alpha)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
 
     if kind == CollectiveKind.ALL_TO_ALL:
+        if topology.kind == TopologyKind.SWITCH:
+            lat, vol, st = _switch_flat_model(M, N, B, alpha, kind.value)
+            if verbose:
+                _print_switch_info(kind.value, M, N, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         # All2All: each GPU sends (N-1) chunks of size M/N, receives (N-1) chunks of size M/N.
         # Input M = total tensor size (e.g. 4*S*h for Ulysses QKV). Volume per GPU = 2*(N-1)*M/N.
         # Latency: simplified as volume_per_gpu / B + alpha*(N-1). Source: L7.

@@ -31,7 +31,7 @@ from comm_overhead.analyze import Config
 
 
 def _topology(s: str) -> TopologyKind:
-    m = {"ring": TopologyKind.RING, "tree": TopologyKind.TREE, "hierarchical": TopologyKind.HIERARCHICAL}
+    m = {"ring": TopologyKind.RING, "tree": TopologyKind.TREE, "hierarchical": TopologyKind.HIERARCHICAL,  "switch": TopologyKind.SWITCH}
     return m[s.lower()]
 
 
@@ -108,6 +108,8 @@ def list_cmds() -> None:
     print(f"{base} collective --topology hierarchical --N 16 --M {M}")
     print(f"{base} collective --topology hierarchical --N 16 --gpus-per-node 8 --M {M}")
     print(f"{base} collective --topology hierarchical --N 16 --gpus-per-node 4 --M {M}")
+    print(f"{base} collective --topology switch --N 8 --M {M}")
+    print(f"{base} analysis --topology switch --num-gpus 8 --dp 8 --params 70e9")
     print()
     print("# ---- 2. Full analysis (DP=8, 70B). Compare DP AllReduce latency and memory ----\n")
     print(f"{base} analysis --topology ring --num-gpus 8 --dp 8 --params 70e9")
@@ -142,7 +144,7 @@ def run_all() -> None:
     rows = []
 
     # Collective: topology x N x gpus_per_node
-    for topo_name, topo_kind in [("ring", TopologyKind.RING), ("tree", TopologyKind.TREE), ("hierarchical", TopologyKind.HIERARCHICAL)]:
+    for topo_name, topo_kind in [("ring", TopologyKind.RING), ("tree", TopologyKind.TREE), ("hierarchical", TopologyKind.HIERARCHICAL),("switch", TopologyKind.SWITCH)]:
         for N in [8, 16]:
             if topo_kind != TopologyKind.HIERARCHICAL:
                 gpus_per_node_list = [None]
@@ -180,7 +182,7 @@ def run_all() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Communication and memory overhead CLI.")
     parser.add_argument("mode", choices=["collective", "analysis", "list-cmds", "run-all"], help="Mode: collective | analysis | list-cmds | run-all")
-    parser.add_argument("--topology", default="ring", choices=["ring", "tree", "hierarchical"], help="Topology (default: ring)")
+    parser.add_argument("--topology", default="ring", choices=["ring", "tree", "hierarchical","switch"], help="Topology (default: ring)")
     parser.add_argument("--N", type=int, default=8, help="Number of GPUs for collective (default: 8)")
     parser.add_argument("--M", default="140e9", help="Tensor size in bytes for collective (default: 140e9)")
     parser.add_argument("--gpus-per-node", type=int, default=None, help="GPUs per node (hierarchical only)")
