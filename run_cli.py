@@ -12,6 +12,7 @@ Modes:
 """
 
 import argparse
+from html import parser
 import sys
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from comm_overhead.analyze import Config
 
 
 def _topology(s: str) -> TopologyKind:
-    m = {"ring": TopologyKind.RING, "tree": TopologyKind.TREE, "hierarchical": TopologyKind.HIERARCHICAL,  "switch": TopologyKind.SWITCH}
+    m = {"ring": TopologyKind.RING, "tree": TopologyKind.TREE, "hierarchical": TopologyKind.HIERARCHICAL,  "switch": TopologyKind.SWITCH, "torus": TopologyKind.TORUS}
     return m[s.lower()]
 
 
@@ -41,6 +42,8 @@ def cmd_collective(args) -> None:
         kind=_topology(args.topology),
         N=args.N,
         gpus_per_node=args.gpus_per_node,
+        n_x=args.grid_nx,
+        n_y=args.grid_ny,
     )
     M = float(args.M)
     res = collective_latency_and_volume(
@@ -71,6 +74,8 @@ def cmd_analysis(args) -> None:
         seq_length=args.seq_length,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
+        n_x=args.grid_nx,
+        n_y=args.grid_ny,
     )
     result = analyze_config(
         config,
@@ -110,6 +115,8 @@ def list_cmds() -> None:
     print(f"{base} collective --topology hierarchical --N 16 --gpus-per-node 4 --M {M}")
     print(f"{base} collective --topology switch --N 8 --M {M}")
     print(f"{base} analysis --topology switch --num-gpus 8 --dp 8 --params 70e9")
+    print(f"{base} collective --topology torus --N 8 --M {M}")
+    print(f"{base} analysis --topology torus --num-gpus 8 --dp 8 --params 70e9")
     print()
     print("# ---- 2. Full analysis (DP=8, 70B). Compare DP AllReduce latency and memory ----\n")
     print(f"{base} analysis --topology ring --num-gpus 8 --dp 8 --params 70e9")
@@ -144,7 +151,7 @@ def run_all() -> None:
     rows = []
 
     # Collective: topology x N x gpus_per_node
-    for topo_name, topo_kind in [("ring", TopologyKind.RING), ("tree", TopologyKind.TREE), ("hierarchical", TopologyKind.HIERARCHICAL),("switch", TopologyKind.SWITCH)]:
+    for topo_name, topo_kind in [("ring", TopologyKind.RING), ("tree", TopologyKind.TREE), ("hierarchical", TopologyKind.HIERARCHICAL),("switch", TopologyKind.SWITCH), ("torus", TopologyKind.TORUS)]:
         for N in [8, 16]:
             if topo_kind != TopologyKind.HIERARCHICAL:
                 gpus_per_node_list = [None]
@@ -159,7 +166,7 @@ def run_all() -> None:
                 rows.append((tag, res.latency_s * 1000, res.steps, res.intra_latency_s * 1000 if res.intra_latency_s else None, res.inter_latency_s * 1000 if res.inter_latency_s else None))
 
     # Analysis: ring vs tree vs hierarchical (8 GPUs, DP=8)
-    for topo_name, topo_kind in [("ring", TopologyKind.RING), ("tree", TopologyKind.TREE), ("hierarchical", TopologyKind.HIERARCHICAL)]:
+    for topo_name, topo_kind in [("ring", TopologyKind.RING), ("tree", TopologyKind.TREE), ("hierarchical", TopologyKind.HIERARCHICAL), ("torus", TopologyKind.TORUS)]:
         gpn = 4 if topo_kind == TopologyKind.HIERARCHICAL else None
         config = Config(num_gpus=8, topology_kind=topo_kind, dp_degree=8, num_parameters=70e9, gpus_per_node=gpn)
         result = analyze_config(config, include_memory_breakdown=False)
@@ -182,11 +189,13 @@ def run_all() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Communication and memory overhead CLI.")
     parser.add_argument("mode", choices=["collective", "analysis", "list-cmds", "run-all"], help="Mode: collective | analysis | list-cmds | run-all")
-    parser.add_argument("--topology", default="ring", choices=["ring", "tree", "hierarchical","switch"], help="Topology (default: ring)")
+    parser.add_argument("--topology", default="ring", choices=["ring", "tree", "hierarchical","switch","torus"], help="Topology (default: ring)")
     parser.add_argument("--N", type=int, default=8, help="Number of GPUs for collective (default: 8)")
     parser.add_argument("--M", default="140e9", help="Tensor size in bytes for collective (default: 140e9)")
     parser.add_argument("--gpus-per-node", type=int, default=None, help="GPUs per node (hierarchical only)")
     parser.add_argument("--tree-algo", action="store_true", help="Use tree algorithm for AllReduce (flat topology)")
+    parser.add_argument("--grid-nx", type=int, default=None, help="Grid n_x for torus, must satisfy n_x*n_y == N")
+    parser.add_argument("--grid-ny", type=int, default=None, help="Grid n_y for torus, must satisfy n_x*n_y == N")
     parser.add_argument("--verbose", action="store_true", help="Print formula and calculation")
     # analysis
     parser.add_argument("--num-gpus", type=int, default=8, help="Total GPUs for analysis (default: 8)")

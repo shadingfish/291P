@@ -74,6 +74,8 @@ class Config:
     seq_length: Optional[int] = None
     hidden_size: Optional[int] = None
     num_layers: Optional[int] = None
+    n_x: Optional[int] = None
+    n_y: Optional[int] = None
 
 
 @dataclass
@@ -165,6 +167,8 @@ def analyze_config(
             B2=config.B2,
             alpha2=config.alpha2,
             gpus_per_node=config.gpus_per_node,
+            n_x=config.n_x,
+            n_y=config.n_y
         )
         res = collective_latency_and_volume(
             CollectiveKind.ALL_REDUCE,
@@ -200,6 +204,8 @@ def analyze_config(
             B2=config.B2,
             alpha2=config.alpha2,
             gpus_per_node=config.gpus_per_node,
+            n_x=config.n_x,
+            n_y=config.n_y
         )
         res = collective_latency_and_volume(
             CollectiveKind.ALL_REDUCE,
