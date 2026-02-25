@@ -23,6 +23,8 @@ All formulas and conventions in this project are tied to the following sources. 
 - **Switch AllReduce latency: 2 * (M/B + alpha)** — [Derived from Star Topology baseline; see Derivations above].
 - **Switch All2All latency: M/B + (N-1)*alpha** — [Logic from L7 CP analysis / DeepSpeed-Ulysses].
 - **Switch AG / RS / Broadcast: M/B + alpha** — [Ideal non-blocking parallel transfer model; Thakur et al. (2005)].
+- **Mesh (2D) AllReduce / AllGather / ReduceScatter / Broadcast** - [*Optimization of Collective Reduction Operations*, R. Rabenseifner et al. (2004)]  
+- **Mesh (2D) All2All** - [*Communication Analysis of Parallel 3D FFT for Flat Cartesian Meshes*, A. Chan et al. (2008)]
 
 ## Bandwidth / latency defaults
 

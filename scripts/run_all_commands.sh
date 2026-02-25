@@ -12,6 +12,8 @@ python run_cli.py collective --topology ring --N 8 --M 140e9
 python run_cli.py collective --topology tree --N 8 --M 140e9
 python run_cli.py collective --topology hierarchical --N 8 --M 140e9
 python run_cli.py collective --topology hierarchical --N 8 --gpus-per-node 4 --M 140e9
+python run_cli.py collective --topology mesh --N 8 --M 140e9
+python run_cli.py collective --topology mesh --N 8 --mesh-nx 4 --mesh-ny 2 --M 140e9
 python run_cli.py collective --topology ring --N 16 --M 140e9
 python run_cli.py collective --topology tree --N 16 --M 140e9
 python run_cli.py collective --topology hierarchical --N 16 --M 140e9
@@ -24,6 +26,7 @@ python run_cli.py analysis --topology ring --num-gpus 8 --dp 8 --params 70e9
 python run_cli.py analysis --topology tree --num-gpus 8 --dp 8 --params 70e9
 python run_cli.py analysis --topology hierarchical --num-gpus 8 --dp 8 --params 70e9
 python run_cli.py analysis --topology hierarchical --num-gpus 8 --dp 8 --gpus-per-node 4 --params 70e9
+python run_cli.py analysis --topology mesh --num-gpus 8 --dp 8 --params 70e9
 
 echo ""
 echo "=== 3. Memory only (no P): per-GPU memory for 70B ==="

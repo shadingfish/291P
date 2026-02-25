@@ -38,6 +38,7 @@ class TopologyKind(str, Enum):
     TREE = "tree"
     HIERARCHICAL = "hierarchical"
     SWITCH = "switch"
+    MESH = "mesh"
 
 
 @dataclass
@@ -55,6 +56,7 @@ class TopologyDesc:
         B2: (Hierarchical) Inter-node bandwidth, bytes/s.
         alpha2: (Hierarchical) Inter-node per-step latency, seconds.
         gpus_per_node: (Hierarchical) GPUs per node; if None, assumed single node.
+        n_x, n_y: (Mesh) Mesh dimensions where n_x * n_y == N.
     """
     kind: TopologyKind
     N: int
@@ -65,7 +67,19 @@ class TopologyDesc:
     B2: float = 0.0
     alpha2: float = 0.0
     gpus_per_node: Optional[int] = None
+    n_x: Optional[int] = None
+    n_y: Optional[int] = None
 
+
+def _default_mesh_dims(N: int) -> tuple[int, int]:
+    """Pick a near-square (n_x, n_y) such that n_x * n_y == N."""
+    if N <= 0:
+        return 0, 0
+    r = int(N ** 0.5)
+    for nx in range(r, 0, -1):
+        if N % nx == 0:
+            return nx, N // nx
+    return 1, N
 
 def build_topology(
     kind: TopologyKind,
@@ -77,6 +91,8 @@ def build_topology(
     B2: Optional[float] = None,
     alpha2: Optional[float] = None,
     gpus_per_node: Optional[int] = None,
+    n_x: Optional[int] = None,
+    n_y: Optional[int] = None,
 ) -> TopologyDesc:
     """
     Build a topology description from the given parameters.
@@ -122,6 +138,17 @@ def build_topology(
             N=N,
             B=B if B is not None else BANDWIDTH_NVLINK_BPS,
             alpha=alpha if alpha is not None else LATENCY_NVLINK_S,
+        )
+    elif kind == TopologyKind.MESH:
+        if n_x is None or n_y is None or n_x <= 0 or n_y <= 0 or n_x * n_y != N:
+            n_x, n_y = _default_mesh_dims(N)
+        return TopologyDesc(
+            kind=TopologyKind.MESH,
+            N=N,
+            B=B if B is not None else BANDWIDTH_NVLINK_BPS,
+            alpha=alpha if alpha is not None else LATENCY_NVLINK_S,
+            n_x=n_x,
+            n_y=n_y,
         )
     else:
         desc = TopologyDesc(
