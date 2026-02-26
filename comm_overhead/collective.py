@@ -209,6 +209,148 @@ def _switch_flat_model(M: float, N: int, B: float, alpha: float, kind: str) -> T
 
     return latency, volume, steps
 
+
+def _require_mesh_dims(topology: TopologyDesc) -> tuple[int, int]:
+    return int(topology.n_x), int(topology.n_y)
+
+
+def _mesh_allreduce(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """2D Mesh AllReduce via dimension-ordered Ring: RS(row) + AR(col on chunk) + AG(row).
+
+    Latency:
+      t = 2*(n_y-1) * (M/(n_y*B) + alpha) + 2*(n_x-1) * (M/(N*B) + alpha)
+
+    Volume per GPU:
+      v = 2*(n_y-1) * (M/n_y) + 2*(n_x-1) * (M/N)
+
+    Source:
+      R. Rabenseifner, "Optimization of Collective Reduction Operations",
+      ICCS 2004.
+      (AllReduce = ReduceScatter + AllGather; 2D mesh obtained via dimension-wise composition.)
+    """
+    N = n_x * n_y
+    if N <= 1:
+        return 0.0, 0.0, 0
+
+    t_row = 2 * (n_y - 1) * (M / (n_y * B) + alpha)
+    t_col = 2 * (n_x - 1) * (M / (N * B) + alpha)
+    latency = t_row + t_col
+
+    volume = 2 * (n_y - 1) * (M / n_y) + 2 * (n_x - 1) * (M / N)
+    steps = 2 * (n_y - 1) + 2 * (n_x - 1)
+    return latency, volume, steps
+
+
+def _mesh_allgather(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """2D Mesh AllGather via dimension order: AG(col on M/n_y) + AG(row on M).
+
+    Latency:
+      t = (n_x-1) * (M/(N*B) + alpha) + (n_y-1) * (M/(n_y*B) + alpha)
+
+    Volume per GPU:
+      v = (n_x-1) * (M/N) + (n_y-1) * (M/n_y)
+
+    Source:
+      R. Rabenseifner, "Optimization of Collective Reduction Operations",
+      ICCS 2004.
+      (Ring AllGather used as building block; extended via dimension-wise composition.)
+    """
+    N = n_x * n_y
+    if N <= 1:
+        return 0.0, 0.0, 0
+    
+    t_col = (n_x - 1) * (M / (N * B) + alpha)
+    t_row = (n_y - 1) * (M / (n_y * B) + alpha)
+    latency = t_col + t_row
+
+    volume = (n_x - 1) * (M / N) + (n_y - 1) * (M / n_y)
+    steps = (n_x - 1) + (n_y - 1)
+    return latency, volume, steps
+
+
+def _mesh_reducescatter(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """2D Mesh ReduceScatter via dimension order: RS(row on M) + RS(col on M/n_y).
+
+    Latency:
+      t = (n_y-1) * (M/(n_y*B) + alpha) + (n_x-1) * (M/(N*B) + alpha)
+
+    Volume per GPU:
+      v = (n_y-1) * (M/n_y) + (n_x-1) * (M/N)
+
+    Source:
+      R. Rabenseifner, "Optimization of Collective Reduction Operations",
+      ICCS 2004.
+      (Ring ReduceScatter building block composed across mesh dimensions.)
+    """
+    N = n_x * n_y
+    if N <= 1:
+        return 0.0, 0.0, 0
+    
+    t_row = (n_y - 1) * (M / (n_y * B) + alpha)
+    t_col = (n_x - 1) * (M / (N * B) + alpha)
+    latency = t_row + t_col
+
+    volume = (n_y - 1) * (M / n_y) + (n_x - 1) * (M / N)
+    steps = (n_y - 1) + (n_x - 1)
+    return latency, volume, steps
+
+
+def _mesh_broadcast(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """2D Mesh Broadcast in two phases: along one dimension, then the other.
+
+    Latency:
+      t = (n_y-1) * (M/(n_y*B) + alpha) + (n_x-1) * (M/(n_x*B) + alpha)
+
+    Volume per GPU:
+      Use an average/upper-bound proxy matching the two ring phases:
+      v = (n_y-1) * (M/n_y) + (n_x-1) * (M/n_x)
+
+    Source:
+      R. Rabenseifner, "Optimization of Collective Reduction Operations",
+      ICCS 2004.
+      (Broadcast modeled using the same α-β cost framework and dimension-wise decomposition.)
+    """
+    N = n_x * n_y
+    if N <= 1:
+        return 0.0, 0.0, 0
+    
+    t_row = (n_y - 1) * (M / (n_y * B) + alpha)
+    t_col = (n_x - 1) * (M / (n_x * B) + alpha)
+    latency = t_row + t_col
+
+    volume = (n_y - 1) * (M / n_y) + (n_x - 1) * (M / n_x)
+    steps = (n_y - 1) + (n_x - 1)
+    return latency, volume, steps
+
+
+def _mesh_alltoall(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """2D Mesh All2All via two local All2All phases: rows then columns.
+
+    Latency:
+      t = [2*(n_y-1)*M/n_y]/B + alpha*(n_y-1)
+        + [2*(n_x-1)*M/n_x]/B + alpha*(n_x-1)
+
+    Volume per GPU:
+      v = 2*(n_y-1)*M/n_y + 2*(n_x-1)*M/n_x
+
+    Source:
+      A. Chan, P. Balaji, W. Gropp, R. Thakur, "Communication Analysis of Parallel 3D FFT for Flat Cartesian Meshes",
+      HiPC 2008.
+      (Row/column All-to-All, a.k.a. pencil transpose.)
+    """
+    N = n_x * n_y
+    if N <= 1:
+        return 0.0, 0.0, 0
+    
+    v_row = 2 * (n_y - 1) * (M / n_y)
+    v_col = 2 * (n_x - 1) * (M / n_x)
+    latency = (v_row / B + alpha * (n_y - 1)) + (v_col / B + alpha * (n_x - 1))
+    
+    volume = v_row + v_col
+    steps = (n_y - 1) + (n_x - 1)
+    return latency, volume, steps
+
+
 def _ring_allgather_or_reducescatter_flat(M: float, N: int, B: float, alpha: float) -> Tuple[float, float, int]:
     """
     Ring AllGather or ReduceScatter: (N-1) steps, each step moves M/N bytes.
@@ -651,6 +793,9 @@ def collective_latency_and_volume(
             lat, vol, st = _torus_allreduce_flat(M, N, nx, ny, B, alpha)
             if verbose:
                 _print_torus_allreduce(M, N, nx, ny, B, alpha, lat, st)
+        elif topology.kind == TopologyKind.MESH:
+            n_x, n_y = _require_mesh_dims(topology)
+            lat, vol, st = _mesh_allreduce(M, n_x, n_y, B, alpha)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         else:
             lat, vol, st = _ring_allreduce_flat(M, N, B, alpha)
@@ -676,6 +821,12 @@ def collective_latency_and_volume(
             lat, vol, st = _torus_ringstyle_flat(M, N, nx, ny, B, alpha)
             if verbose:
                 _print_torus_ringstyle(kind.value, M, N, nx, ny, B, alpha, lat, st)
+        elif topology.kind == TopologyKind.MESH:
+            n_x, n_y = _require_mesh_dims(topology)
+            if kind == CollectiveKind.ALL_GATHER:
+                lat, vol, st = _mesh_allgather(M, n_x, n_y, B, alpha)
+            else:
+                lat, vol, st = _mesh_reducescatter(M, n_x, n_y, B, alpha)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         else:
             lat, vol, st = _ring_allgather_or_reducescatter_flat(M, N, B, alpha)
@@ -697,6 +848,9 @@ def collective_latency_and_volume(
             lat, vol, st = _torus_ringstyle_flat(M, N, nx, ny, B, alpha)
             if verbose:
                 _print_torus_ringstyle(kind.value, M, N, nx, ny, B, alpha, lat, st)
+        elif topology.kind == TopologyKind.MESH:
+            n_x, n_y = _require_mesh_dims(topology)
+            lat, vol, st = _mesh_broadcast(M, n_x, n_y, B, alpha)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         else:
             lat, vol, st = _ring_allgather_or_reducescatter_flat(M, N, B, alpha)
@@ -714,6 +868,9 @@ def collective_latency_and_volume(
             lat, vol, st = _torus_all2all_flat(M, N, nx, ny, B, alpha)
             if verbose:
                 _print_torus_all2all(M, N, nx, ny, B, alpha, lat, st)
+        elif topology.kind == TopologyKind.MESH:
+            n_x, n_y = _require_mesh_dims(topology)
+            lat, vol, st = _mesh_alltoall(M, n_x, n_y, B, alpha)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         # All2All: each GPU sends (N-1) chunks of size M/N, receives (N-1) chunks of size M/N.
         # Input M = total tensor size (e.g. 4*S*h for Ulysses QKV). Volume per GPU = 2*(N-1)*M/N.

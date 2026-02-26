@@ -34,6 +34,9 @@ All formulas and conventions in this project are tied to the following sources. 
 - **Torus (2D) All2All (two-phase approximation)**:
   `T ≈ (nx-1) * ( (M/ny)/(nx*B) + alpha ) + (ny-1) * ( M/(ny*B) + alpha )`;
   volume per GPU `V = 2*(N-1)*(M/N)` — [L7] (volume), timing template [L4, slide 34].
+- **Mesh (2D) AllReduce / AllGather / ReduceScatter / Broadcast** - [*Optimization of Collective Reduction Operations*, R. Rabenseifner et al. (2004)]  
+- **Mesh (2D) All2All** - [*Communication Analysis of Parallel 3D FFT for Flat Cartesian Meshes*, A. Chan et al. (2008)]
+
 ## Bandwidth / latency defaults
 
 - NVLink intra-node: ~900 GB/s, low latency — [L4, slide 16].
