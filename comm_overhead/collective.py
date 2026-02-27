@@ -791,6 +791,7 @@ def collective_latency_and_volume(
             lat, vol, st = _torus_allreduce_flat(M, N, nx, ny, B, alpha)
             if verbose:
                 _print_torus_allreduce(M, N, nx, ny, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         elif topology.kind == TopologyKind.MESH:
             n_x, n_y = _require_mesh_dims(topology)
             lat, vol, st = _mesh_allreduce(M, n_x, n_y, B, alpha)
@@ -819,6 +820,7 @@ def collective_latency_and_volume(
             lat, vol, st = _torus_ringstyle_flat(M, N, nx, ny, B, alpha)
             if verbose:
                 _print_torus_ringstyle(kind.value, M, N, nx, ny, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         elif topology.kind == TopologyKind.MESH:
             n_x, n_y = _require_mesh_dims(topology)
             if kind == CollectiveKind.ALL_GATHER:
@@ -846,6 +848,7 @@ def collective_latency_and_volume(
             lat, vol, st = _torus_ringstyle_flat(M, N, nx, ny, B, alpha)
             if verbose:
                 _print_torus_ringstyle(kind.value, M, N, nx, ny, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         elif topology.kind == TopologyKind.MESH:
             n_x, n_y = _require_mesh_dims(topology)
             lat, vol, st = _mesh_broadcast(M, n_x, n_y, B, alpha)
@@ -866,6 +869,7 @@ def collective_latency_and_volume(
             lat, vol, st = _torus_all2all_flat(M, N, nx, ny, B, alpha)
             if verbose:
                 _print_torus_all2all(M, N, nx, ny, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         elif topology.kind == TopologyKind.MESH:
             n_x, n_y = _require_mesh_dims(topology)
             lat, vol, st = _mesh_alltoall(M, n_x, n_y, B, alpha)
