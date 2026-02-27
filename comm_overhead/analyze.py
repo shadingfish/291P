@@ -74,6 +74,9 @@ class Config:
     seq_length: Optional[int] = None
     hidden_size: Optional[int] = None
     num_layers: Optional[int] = None
+    n_x: Optional[int] = None
+    n_y: Optional[int] = None
+
     mesh_nx: Optional[int] = None
     mesh_ny: Optional[int] = None
 

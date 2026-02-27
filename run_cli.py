@@ -12,6 +12,7 @@ Modes:
 """
 
 import argparse
+from html import parser
 import sys
 from pathlib import Path
 
@@ -37,6 +38,7 @@ def _topology(s: str) -> TopologyKind:
         "hierarchical": TopologyKind.HIERARCHICAL,
         "switch": TopologyKind.SWITCH,
         "mesh": TopologyKind.MESH,
+        "torus": TopologyKind.TORUS
     }
     return m[s.lower()]
 
@@ -47,6 +49,8 @@ def cmd_collective(args) -> None:
         kind=_topology(args.topology),
         N=args.N,
         gpus_per_node=args.gpus_per_node,
+        n_x=args.grid_nx,
+        n_y=args.grid_ny,
         n_x=args.mesh_nx,
         n_y=args.mesh_ny,
     )
@@ -79,6 +83,8 @@ def cmd_analysis(args) -> None:
         seq_length=args.seq_length,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
+        n_x=args.grid_nx,
+        n_y=args.grid_ny,
         mesh_nx=args.mesh_nx,
         mesh_ny=args.mesh_ny,
     )
@@ -120,6 +126,8 @@ def list_cmds() -> None:
     print(f"{base} collective --topology hierarchical --N 16 --gpus-per-node 4 --M {M}")
     print(f"{base} collective --topology switch --N 8 --M {M}")
     print(f"{base} analysis --topology switch --num-gpus 8 --dp 8 --params 70e9")
+    print(f"{base} collective --topology torus --N 8 --M {M}")
+    print(f"{base} analysis --topology torus --num-gpus 8 --dp 8 --params 70e9")
     print(f"{base} collective --topology mesh --N 8 --M {M}")
     print(f"{base} collective --topology mesh --N 8 --mesh-nx 4 --mesh-ny 2 --M {M}")
     print(f"{base} analysis --topology mesh --num-gpus 8 --dp 8 --params 70e9")
@@ -163,6 +171,7 @@ def run_all() -> None:
         ("hierarchical", TopologyKind.HIERARCHICAL),
         ("switch", TopologyKind.SWITCH),
         ("mesh", TopologyKind.MESH),
+        ("torus", TopologyKind.TORUS)
     ]:
         for N in [8, 16]:
             if topo_kind != TopologyKind.HIERARCHICAL:
@@ -184,6 +193,7 @@ def run_all() -> None:
         ("hierarchical", TopologyKind.HIERARCHICAL),
         ("switch", TopologyKind.SWITCH),
         ("mesh", TopologyKind.MESH),
+        ("torus", TopologyKind.TORUS)
     ]:
         gpn = 4 if topo_kind == TopologyKind.HIERARCHICAL else None
         config = Config(num_gpus=8, topology_kind=topo_kind, dp_degree=8, num_parameters=70e9, gpus_per_node=gpn)
@@ -207,13 +217,15 @@ def run_all() -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Communication and memory overhead CLI.")
     parser.add_argument("mode", choices=["collective", "analysis", "list-cmds", "run-all"], help="Mode: collective | analysis | list-cmds | run-all")
-    parser.add_argument("--topology", default="ring", choices=["ring", "tree", "hierarchical", "switch", "mesh"], help="Topology (default: ring)")
+    parser.add_argument("--topology", default="ring", choices=["ring", "tree", "hierarchical", "switch", "mesh", "torus"], help="Topology (default: ring)")
     parser.add_argument("--N", type=int, default=8, help="Number of GPUs for collective (default: 8)")
     parser.add_argument("--M", default="140e9", help="Tensor size in bytes for collective (default: 140e9)")
     parser.add_argument("--gpus-per-node", type=int, default=None, help="GPUs per node (hierarchical only)")
     parser.add_argument("--mesh-nx", type=int, default=None, help="Mesh dim n_x (mesh only; require nx*ny==N)")
     parser.add_argument("--mesh-ny", type=int, default=None, help="Mesh dim n_y (mesh only; require nx*ny==N)")
     parser.add_argument("--tree-algo", action="store_true", help="Use tree algorithm for AllReduce (flat topology)")
+    parser.add_argument("--grid-nx", type=int, default=None, help="Grid n_x for torus, must satisfy n_x*n_y == N")
+    parser.add_argument("--grid-ny", type=int, default=None, help="Grid n_y for torus, must satisfy n_x*n_y == N")
     parser.add_argument("--verbose", action="store_true", help="Print formula and calculation")
     # analysis
     parser.add_argument("--num-gpus", type=int, default=8, help="Total GPUs for analysis (default: 8)")

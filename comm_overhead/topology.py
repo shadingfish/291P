@@ -18,11 +18,14 @@ CONSTRAINTS WHEN USED WITH collective.py
            when set (e.g. 4 for 2 nodes x 4 GPUs), collective formulas use
            (gpus_per_node - 1) intra steps per phase (Case 2, L5 slide); when None,
            intra steps = (N - 1) (simplified model).
+  - TORUS: Requires N = n_x * n_y. If n_x/n_y not given, we infer a near-square grid.
+           (Collective formulas are in collective.py.)
 """
 
 from dataclasses import dataclass
 from enum import Enum
 from typing import Optional
+from math import isqrt
 
 from comm_overhead.constants import (
     BANDWIDTH_NVLINK_BPS,
@@ -38,6 +41,7 @@ class TopologyKind(str, Enum):
     TREE = "tree"
     HIERARCHICAL = "hierarchical"
     SWITCH = "switch"
+    TORUS = "torus"
     MESH = "mesh"
 
 
@@ -138,6 +142,28 @@ def build_topology(
             N=N,
             B=B if B is not None else BANDWIDTH_NVLINK_BPS,
             alpha=alpha if alpha is not None else LATENCY_NVLINK_S,
+        )
+    elif kind == TopologyKind.TORUS:
+        if n_x is not None and n_y is not None:
+            if n_x * n_y != N:
+                raise ValueError(f"TORUS requires n_x*n_y == N, got {n_x}*{n_y} != {N}")
+        else:
+            r = int(isqrt(N))
+            nx = 1
+            for d in range(r, 0, -1):
+                if N % d == 0:
+                    nx = d
+                    break
+            n_x = nx
+            n_y = N // nx
+
+        desc = TopologyDesc(
+            kind=TopologyKind.TORUS,
+            N=N,
+            B=B if B is not None else BANDWIDTH_NVLINK_BPS,
+            alpha=alpha if alpha is not None else LATENCY_NVLINK_S,
+            n_x=n_x,
+            n_y=n_y,
         )
     elif kind == TopologyKind.MESH:
         if n_x is None or n_y is None or n_x <= 0 or n_y <= 0 or n_x * n_y != N:
