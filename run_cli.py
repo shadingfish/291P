@@ -49,10 +49,8 @@ def cmd_collective(args) -> None:
         kind=_topology(args.topology),
         N=args.N,
         gpus_per_node=args.gpus_per_node,
-        n_x=args.grid_nx,
-        n_y=args.grid_ny,
-        n_x=args.mesh_nx,
-        n_y=args.mesh_ny,
+        n_x=args.nx,
+        n_y=args.ny,
     )
     M = float(args.M)
     res = collective_latency_and_volume(
@@ -83,10 +81,8 @@ def cmd_analysis(args) -> None:
         seq_length=args.seq_length,
         hidden_size=args.hidden_size,
         num_layers=args.num_layers,
-        n_x=args.grid_nx,
-        n_y=args.grid_ny,
-        mesh_nx=args.mesh_nx,
-        mesh_ny=args.mesh_ny,
+        nx=args.nx,
+        ny=args.ny,
     )
     result = analyze_config(
         config,
@@ -129,7 +125,7 @@ def list_cmds() -> None:
     print(f"{base} collective --topology torus --N 8 --M {M}")
     print(f"{base} analysis --topology torus --num-gpus 8 --dp 8 --params 70e9")
     print(f"{base} collective --topology mesh --N 8 --M {M}")
-    print(f"{base} collective --topology mesh --N 8 --mesh-nx 4 --mesh-ny 2 --M {M}")
+    print(f"{base} collective --topology mesh --N 8 --nx 4 --ny 2 --M {M}")
     print(f"{base} analysis --topology mesh --num-gpus 8 --dp 8 --params 70e9")
     print()
     print("# ---- 2. Full analysis (DP=8, 70B). Compare DP AllReduce latency and memory ----\n")
@@ -221,11 +217,9 @@ def main() -> None:
     parser.add_argument("--N", type=int, default=8, help="Number of GPUs for collective (default: 8)")
     parser.add_argument("--M", default="140e9", help="Tensor size in bytes for collective (default: 140e9)")
     parser.add_argument("--gpus-per-node", type=int, default=None, help="GPUs per node (hierarchical only)")
-    parser.add_argument("--mesh-nx", type=int, default=None, help="Mesh dim n_x (mesh only; require nx*ny==N)")
-    parser.add_argument("--mesh-ny", type=int, default=None, help="Mesh dim n_y (mesh only; require nx*ny==N)")
+    parser.add_argument("--nx", type=int, default=None, help="2D grid dim n_x for mesh/torus (require nx*ny==N)")
+    parser.add_argument("--ny", type=int, default=None, help="2D grid dim n_y for mesh/torus (require nx*ny==N)")
     parser.add_argument("--tree-algo", action="store_true", help="Use tree algorithm for AllReduce (flat topology)")
-    parser.add_argument("--grid-nx", type=int, default=None, help="Grid n_x for torus, must satisfy n_x*n_y == N")
-    parser.add_argument("--grid-ny", type=int, default=None, help="Grid n_y for torus, must satisfy n_x*n_y == N")
     parser.add_argument("--verbose", action="store_true", help="Print formula and calculation")
     # analysis
     parser.add_argument("--num-gpus", type=int, default=8, help="Total GPUs for analysis (default: 8)")
