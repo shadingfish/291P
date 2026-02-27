@@ -12,27 +12,21 @@ SUPPORTED COMBINATIONS (collective_kind x topology_kind)
 -----------------------------------------------------------------------------
   Implemented:
                             RING    TREE    HIERARCHICAL(RING ONLY)   SWITCH   MESH   TORUS
-  ALL_REDUCE                 yes    yes*    yes            yes      TBD    TBD
-  ALL_GATHER                 yes    no**    yes            yes      TBD    TBD
-  REDUCE_SCATTER             yes    no**    yes            yes      TBD    TBD
-  BROADCAST                  yes    no**    yes            yes      TBD    TBD
-  ALL_TO_ALL                 yes    no**    yes***         yes      TBD    TBD
+  ALL_REDUCE                 yes    yes*    yes            yes      yes    TBD
+  ALL_GATHER                 yes    no**    yes            yes      yes    TBD
+  REDUCE_SCATTER             yes    no**    yes            yes      yes    TBD
+  BROADCAST                  yes    no**    yes            yes      yes    TBD
+  ALL_TO_ALL                 yes    no**    yes***         yes      yes    TBD
 
   * TREE: AllReduce uses tree algorithm. Other collectives use ring-style formula.
   ** TREE + non-AllReduce: ring-style formula (B, alpha), no dedicated tree algo.
   *** HIERARCHICAL All2All: simplified (B2/alpha2 dominant).
+  MESH: 2D grid (n_x * n_y = N); dimension-ordered ring (row then column). See
+    _mesh_* helpers; source Rabenseifner ICCS 2004, Chan et al. HiPC 2008 (All2All).
 
-  Planned (Switch / Mesh / Torus) – not yet implemented:
-  - SWITCH: idealized star or full bisection; often 1 or few steps for many
-    collectives (e.g. single-round broadcast, reduce to root then broadcast).
-    When implemented: ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER, BROADCAST, ALL_TO_ALL
-    can each have a switch-specific formula (e.g. 2 steps for AllReduce).
-  - MESH: 2D grid (n_x * n_y = N). Typically dimension-ordered ring or
-    recursive halving. When implemented: all collectives along rows/columns
-    or multi-phase; document per-collective steps and which links (B) are used.
+  Planned:
   - TORUS: mesh with wrap-around; same collective algorithms as mesh with
-    different step counts or contention model. When implemented: same as MESH
-    with torus-specific step/latency formulas.
+    different step counts or contention model.
 
 -----------------------------------------------------------------------------
 HIERARCHICAL: per-node topology
@@ -211,7 +205,11 @@ def _switch_flat_model(M: float, N: int, B: float, alpha: float, kind: str) -> T
 
 
 def _require_mesh_dims(topology: TopologyDesc) -> tuple[int, int]:
-    return int(topology.n_x), int(topology.n_y)
+    """Return (n_x, n_y) for MESH; fallback to near-square if n_x/n_y missing."""
+    if topology.n_x is not None and topology.n_y is not None and topology.n_x > 0 and topology.n_y > 0 and topology.n_x * topology.n_y == topology.N:
+        return int(topology.n_x), int(topology.n_y)
+    from comm_overhead.topology import _default_mesh_dims
+    return _default_mesh_dims(topology.N)
 
 
 def _mesh_allreduce(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:

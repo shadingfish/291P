@@ -94,7 +94,7 @@ def cmd_analysis(args) -> None:
         print(f"  total_comm_per_step_ms={result.total_comm_time_per_step_upper_bound_s*1000:.2f} (upper bound, no overlap)")
     print(f"  per_gpu_memory_GB={result.per_gpu_memory_bytes/1e9:.2f}")
     for r in result.collective_reports:
-        line = f"  {r.name}: latency_ms={r.latency_s*1000:.2f}, steps={r.steps}"
+        line = f"  {r.name}: latency_ms={r.latency_s*1000:.2f}, steps={r.steps}, volume_GB={r.volume_bytes/1e9:.2f}"
         if r.intra_latency_s is not None:
             line += f", intra_ms={r.intra_latency_s*1000:.2f}, inter_ms={r.inter_latency_s*1000:.2f}"
         print(line)
