@@ -12,27 +12,21 @@ SUPPORTED COMBINATIONS (collective_kind x topology_kind)
 -----------------------------------------------------------------------------
   Implemented:
                             RING    TREE    HIERARCHICAL(RING ONLY)   SWITCH   MESH   TORUS
-  ALL_REDUCE                 yes    yes*    yes            yes      TBD    TBD
-  ALL_GATHER                 yes    no**    yes            yes      TBD    TBD
-  REDUCE_SCATTER             yes    no**    yes            yes      TBD    TBD
-  BROADCAST                  yes    no**    yes            yes      TBD    TBD
-  ALL_TO_ALL                 yes    no**    yes***         yes      TBD    TBD
+  ALL_REDUCE                 yes    yes*    yes            yes      yes    yes
+  ALL_GATHER                 yes    no**    yes            yes      yes    yes
+  REDUCE_SCATTER             yes    no**    yes            yes      yes    yes
+  BROADCAST                  yes    no**    yes            yes      yes    yes
+  ALL_TO_ALL                 yes    no**    yes***         yes      yes    yes
 
   * TREE: AllReduce uses tree algorithm. Other collectives use ring-style formula.
   ** TREE + non-AllReduce: ring-style formula (B, alpha), no dedicated tree algo.
   *** HIERARCHICAL All2All: simplified (B2/alpha2 dominant).
+  MESH: 2D grid (n_x * n_y = N); dimension-ordered ring (row then column). See
+    _mesh_* helpers; source Rabenseifner ICCS 2004, Chan et al. HiPC 2008 (All2All).
 
-  Planned (Switch / Mesh / Torus) – not yet implemented:
-  - SWITCH: idealized star or full bisection; often 1 or few steps for many
-    collectives (e.g. single-round broadcast, reduce to root then broadcast).
-    When implemented: ALL_REDUCE, ALL_GATHER, REDUCE_SCATTER, BROADCAST, ALL_TO_ALL
-    can each have a switch-specific formula (e.g. 2 steps for AllReduce).
-  - MESH: 2D grid (n_x * n_y = N). Typically dimension-ordered ring or
-    recursive halving. When implemented: all collectives along rows/columns
-    or multi-phase; document per-collective steps and which links (B) are used.
+  Planned:
   - TORUS: mesh with wrap-around; same collective algorithms as mesh with
-    different step counts or contention model. When implemented: same as MESH
-    with torus-specific step/latency formulas.
+    different step counts or contention model.
 
 -----------------------------------------------------------------------------
 HIERARCHICAL: per-node topology
@@ -211,7 +205,11 @@ def _switch_flat_model(M: float, N: int, B: float, alpha: float, kind: str) -> T
 
 
 def _require_mesh_dims(topology: TopologyDesc) -> tuple[int, int]:
-    return int(topology.n_x), int(topology.n_y)
+    """Return (n_x, n_y) for MESH; fallback to near-square if n_x/n_y missing."""
+    if topology.n_x is not None and topology.n_y is not None and topology.n_x > 0 and topology.n_y > 0 and topology.n_x * topology.n_y == topology.N:
+        return int(topology.n_x), int(topology.n_y)
+    from comm_overhead.topology import _default_mesh_dims
+    return _default_mesh_dims(topology.N)
 
 
 def _mesh_allreduce(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
@@ -371,6 +369,118 @@ def _ring_allgather_or_reducescatter_flat(M: float, N: int, B: float, alpha: flo
     volume_per_gpu = (N - 1) * (M / N)
     return latency, volume_per_gpu, steps
 
+def _torus_dims(topology: TopologyDesc) -> Tuple[int, int]:
+    """
+    Get TORUS grid dims (n_x, n_y).
+
+    TopologyDesc was constructed by build_topology(), which sets n_x/n_y.
+    """
+    if topology.n_x is None or topology.n_y is None:
+        raise ValueError("TORUS requires n_x and n_y to be set (expected from build_topology()).")
+    return topology.n_x, topology.n_y
+
+def _torus_allreduce_flat(M: float, N: int, nx: int, ny: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """
+    TORUS AllReduce (2D) modeled as dimension-ordered bucket AllReduce:
+    ReduceScatter + AllGather across X (rows), then across Y (columns).
+
+    Model:
+      - Use 1D Ring step-time template (α–β): time_per_step = payload/(k*B) + alpha
+        where k = the group size along that dimension.
+        Source: L4 slide 34.
+      - Dimension-ordered view:
+        Source: [Collective algorithms for multiported torus networks; Sack & Gropp (2015)].
+
+    Convention:
+      N = nx * ny. M is the full tensor size (bytes).
+
+    Bucket phase sizing:
+      - X phase (row group size nx): total tensor within a row = M/ny.
+      - Y phase (column group size ny): after X, each rank holds a row-block (size M/ny);
+        the column AllReduce then operates on total tensor size M.
+
+    Formula (AllReduce = 2 phases, each uses Ring AllReduce steps):
+      latency =
+        2*(nx-1) * ( (M/ny)/(nx*B) + alpha )
+      + 2*(ny-1) * ( M/(ny*B) + alpha )
+
+      steps = 2*(nx-1) + 2*(ny-1)
+
+    Volume:
+      volume_per_gpu = 2*(N-1)*(M/N)
+    """
+    if N <= 1:
+        return 0.0, 0.0, 0
+    lat_x = 2 * (nx - 1) * ((M / ny) / (nx * B) + alpha)
+    lat_y = 2 * (ny - 1) * (M / (ny * B) + alpha)
+    latency = lat_x + lat_y
+    steps = 2 * (nx - 1) + 2 * (ny - 1)
+    volume_per_gpu = 2 * (N - 1) * (M / N)
+    return latency, volume_per_gpu, steps
+
+def _torus_ringstyle_flat(M: float, N: int, nx: int, ny: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """
+    TORUS AllGather / ReduceScatter / Broadcast modeled as 2D dimension-ordered
+    ring-style collective: X phase then Y phase.
+
+    We reuse ring-style (N-1) step model:
+      Ring-style latency(k, payload) = (k-1) * ( payload/(k*B) + alpha )
+    Source basis: L4 slide 34 (Ring AllGather / ReduceScatter).
+
+    Payload approximation:
+      X phase payload ~= M/ny, group size nx
+      Y phase payload ~= M/nx, group size ny
+
+    Total:
+      latency = (nx-1)*((M/ny)/(nx*B)+alpha) + (ny-1)*((M/nx)/(ny*B)+alpha)
+      steps   = (nx-1) + (ny-1)
+
+    Volume:
+      volume_per_gpu = (N-1)*(M/N)
+    """
+    if N <= 1:
+        return 0.0, 0.0, 0
+
+    lat_x = (nx - 1) * ((M / ny) / (nx * B) + alpha)
+    lat_y = (ny - 1) * ((M / nx) / (ny * B) + alpha)
+    latency = lat_x + lat_y
+
+    steps = (nx - 1) + (ny - 1)
+
+    volume_per_gpu = (N - 1) * (M / N)
+    return latency, volume_per_gpu, steps
+
+
+def _torus_all2all_flat(M: float, N: int, nx: int, ny: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """
+    TORUS All2All modeled as a 2-phase (X then Y) approximation.
+
+    Convention:
+      N = nx * ny. M is the full tensor size (bytes).
+
+    Timing approximation (dimension-ordered, bucket-like phases):
+      T \approx (nx-1) * ( (M/ny)/(nx*B) + alpha ) + (ny-1) * ( M/(ny*B) + alpha )
+
+    References:
+      - All2All volume/context: L7.
+      - Per-step α–β timing template reused from 1D ring-style: L4 slide 34.
+      - Dimension-ordered multi-dim communication is a common closed-form approximation.
+
+    Volume per GPU:
+      volume_per_gpu = 2*(N-1)*(M/N)
+    """
+    if N <= 1:
+        return 0.0, 0.0, 0
+
+    lat_x = (nx - 1) * ((M / ny) / (nx * B) + alpha)
+    lat_y = (ny - 1) * (M / (ny * B) + alpha)
+
+    latency = lat_x + lat_y
+    steps = (nx - 1) + (ny - 1)
+
+    volume_per_gpu = 2 * (N - 1) * (M / N)
+    return latency, volume_per_gpu, steps
+
 def _hierarchical_ring_allreduce(
     M: float,
     N: int,
@@ -500,6 +610,83 @@ def _print_switch_info(kind: str, M: float, N: int, B: float, alpha: float, lat:
 
     print(f"  [Result]  latency = {lat:.4e} s ({lat * 1000:.2f} ms)")
 
+
+def _print_torus_allreduce(
+    M: float, N: int, nx: int, ny: int, B: float, alpha: float, lat: float, st: int
+) -> None:
+    """Print TORUS AllReduce formula and calculation (dimension-ordered; L4 slide 34; Sack & Gropp 2015)."""
+    payload_x = M / ny
+    t_step_x = payload_x / (nx * B) + alpha
+    steps_x = 2 * (nx - 1)
+    lat_x = steps_x * t_step_x
+
+    payload_y = M
+    t_step_y = payload_y / (ny * B) + alpha
+    steps_y = 2 * (ny - 1)
+    lat_y = steps_y * t_step_y
+
+    print("  [Formula] TORUS AllReduce (bucket, X then Y) (L4 slide 34; Sack & Gropp 2015)")
+    print(f"  [Input]   N={N} (nx={nx}, ny={ny}), M={M:.2e} B, B={B:.2e} B/s, alpha={alpha:.2e} s")
+    print(f"  [X]       steps_x = 2*(nx-1) = {steps_x}; total_x = M/ny = {payload_x:.2e} B")
+    print(f"            time_x_per_step = total_x/(nx*B)+alpha = {payload_x/(nx*B):.4e} + {alpha:.2e} = {t_step_x:.4e} s")
+    print(f"            lat_x = {lat_x:.4e} s ({lat_x*1000:.2f} ms)")
+    print(f"  [Y]       steps_y = 2*(ny-1) = {steps_y}; total_y = M = {payload_y:.2e} B")
+    print(f"            time_y_per_step = total_y/(ny*B)+alpha = {payload_y/(ny*B):.4e} + {alpha:.2e} = {t_step_y:.4e} s")
+    print(f"            lat_y = {lat_y:.4e} s ({lat_y*1000:.2f} ms)")
+    print(f"  [Total]   steps = {steps_x}+{steps_y} = {st}; latency = {lat:.4e} s ({lat*1000:.2f} ms)")
+
+
+def _print_torus_ringstyle(
+    kind: str, M: float, N: int, nx: int, ny: int, B: float, alpha: float, lat: float, st: int
+) -> None:
+    """Print TORUS ring-style (AG/RS/Broadcast) formula and calculation (bucket; L4 slide 34; Sack & Gropp 2015)."""
+    payload_x = M / ny
+    t_step_x = payload_x / (nx * B) + alpha
+    steps_x = nx - 1
+    lat_x = steps_x * t_step_x
+
+    payload_y = M
+    t_step_y = payload_y / (ny * B) + alpha
+    steps_y = ny - 1
+    lat_y = steps_y * t_step_y
+
+    print(f"  [Formula] TORUS {kind} (bucket, X then Y) (L4 slide 34; Sack & Gropp 2015)")
+    print(f"  [Input]   N={N} (nx={nx}, ny={ny}), M={M:.2e} B, B={B:.2e} B/s, alpha={alpha:.2e} s")
+    print(f"  [X]       steps_x = nx-1 = {steps_x}; total_x = M/ny = {payload_x:.2e} B")
+    print(f"            time_x_per_step = total_x/(nx*B)+alpha = {payload_x/(nx*B):.4e} + {alpha:.2e} = {t_step_x:.4e} s")
+    print(f"            lat_x = {lat_x:.4e} s ({lat_x*1000:.2f} ms)")
+    print(f"  [Y]       steps_y = ny-1 = {steps_y}; total_y = M = {payload_y:.2e} B")
+    print(f"            time_y_per_step = total_y/(ny*B)+alpha = {payload_y/(ny*B):.4e} + {alpha:.2e} = {t_step_y:.4e} s")
+    print(f"            lat_y = {lat_y:.4e} s ({lat_y*1000:.2f} ms)")
+    print(f"  [Total]   steps = {steps_x}+{steps_y} = {st}; latency = {lat:.4e} s ({lat*1000:.2f} ms)")
+
+
+def _print_torus_all2all(
+    M: float, N: int, nx: int, ny: int, B: float, alpha: float, lat: float, st: int
+) -> None:
+    """Print TORUS All2All two-phase approximation (L7 volume; timing template L4 slide 34)."""
+    payload_x = M / ny
+    t_step_x = payload_x / (nx * B) + alpha
+    steps_x = nx - 1
+    lat_x = steps_x * t_step_x
+
+    payload_y = M
+    t_step_y = payload_y / (ny * B) + alpha
+    steps_y = ny - 1
+    lat_y = steps_y * t_step_y
+    volume_per_gpu = 2 * (N - 1) * (M / N)
+
+    print("  [Formula] TORUS All2All ≈ X-phase + Y-phase (L7 volume; timing template L4 slide 34)")
+    print(f"  [Input]   N={N} (nx={nx}, ny={ny}), M={M:.2e} B, B={B:.2e} B/s, alpha={alpha:.2e} s")
+    print(f"  [X]       steps_x = nx-1 = {steps_x}; total_x = M/ny = {payload_x:.2e} B")
+    print(f"            time_x_per_step = total_x/(nx*B)+alpha = {payload_x/(nx*B):.4e} + {alpha:.2e} = {t_step_x:.4e} s")
+    print(f"            lat_x = {lat_x:.4e} s ({lat_x*1000:.2f} ms)")
+    print(f"  [Y]       steps_y = ny-1 = {steps_y}; total_y = M = {payload_y:.2e} B")
+    print(f"            time_y_per_step = total_y/(ny*B)+alpha = {payload_y/(ny*B):.4e} + {alpha:.2e} = {t_step_y:.4e} s")
+    print(f"            lat_y = {lat_y:.4e} s ({lat_y*1000:.2f} ms)")
+    print(f"  [Total]   steps = {steps_x}+{steps_y} = {st}; latency = {lat:.4e} s ({lat*1000:.2f} ms)")
+    print(f"  [Volume]  volume_per_gpu = 2*(N-1)*(M/N) = {volume_per_gpu:.2e} B ({volume_per_gpu/1e9:.2f} GB)")
+
 def collective_latency_and_volume(
     kind: CollectiveKind,
     M: float,
@@ -599,6 +786,12 @@ def collective_latency_and_volume(
             if verbose:
                 _print_switch_info(kind.value, M, N, B, alpha, lat, st)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
+        elif topology.kind == TopologyKind.TORUS:
+            nx, ny = _torus_dims(topology)
+            lat, vol, st = _torus_allreduce_flat(M, N, nx, ny, B, alpha)
+            if verbose:
+                _print_torus_allreduce(M, N, nx, ny, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         elif topology.kind == TopologyKind.MESH:
             n_x, n_y = _require_mesh_dims(topology)
             lat, vol, st = _mesh_allreduce(M, n_x, n_y, B, alpha)
@@ -622,6 +815,12 @@ def collective_latency_and_volume(
             if verbose:
                 _print_switch_info(kind.value, M, N, B, alpha, lat, st)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
+        elif topology.kind == TopologyKind.TORUS:
+            nx, ny = _torus_dims(topology)
+            lat, vol, st = _torus_ringstyle_flat(M, N, nx, ny, B, alpha)
+            if verbose:
+                _print_torus_ringstyle(kind.value, M, N, nx, ny, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         elif topology.kind == TopologyKind.MESH:
             n_x, n_y = _require_mesh_dims(topology)
             if kind == CollectiveKind.ALL_GATHER:
@@ -644,6 +843,12 @@ def collective_latency_and_volume(
             if verbose:
                 _print_switch_info(kind.value, M, N, B, alpha, lat, st)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
+        elif topology.kind == TopologyKind.TORUS:
+            nx, ny = _torus_dims(topology)
+            lat, vol, st = _torus_ringstyle_flat(M, N, nx, ny, B, alpha)
+            if verbose:
+                _print_torus_ringstyle(kind.value, M, N, nx, ny, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         elif topology.kind == TopologyKind.MESH:
             n_x, n_y = _require_mesh_dims(topology)
             lat, vol, st = _mesh_broadcast(M, n_x, n_y, B, alpha)
@@ -657,6 +862,13 @@ def collective_latency_and_volume(
             lat, vol, st = _switch_flat_model(M, N, B, alpha, kind.value)
             if verbose:
                 _print_switch_info(kind.value, M, N, B, alpha, lat, st)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
+        
+        if topology.kind == TopologyKind.TORUS:
+            nx, ny = _torus_dims(topology)
+            lat, vol, st = _torus_all2all_flat(M, N, nx, ny, B, alpha)
+            if verbose:
+                _print_torus_all2all(M, N, nx, ny, B, alpha, lat, st)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         elif topology.kind == TopologyKind.MESH:
             n_x, n_y = _require_mesh_dims(topology)

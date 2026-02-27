@@ -23,6 +23,17 @@ All formulas and conventions in this project are tied to the following sources. 
 - **Switch AllReduce latency: 2 * (M/B + alpha)** — [Derived from Star Topology baseline; see Derivations above].
 - **Switch All2All latency: M/B + (N-1)*alpha** — [Logic from L7 CP analysis / DeepSpeed-Ulysses].
 - **Switch AG / RS / Broadcast: M/B + alpha** — [Ideal non-blocking parallel transfer model; Thakur et al. (2005)].
+- **Torus (2D) dimension-ordered model** 
+    Let `N = nx * ny`. In this tool, `M` is the full tensor size (bytes). We model 2D torus collectives as **dimension-ordered phases (X then Y)** using a **bucket** view (“run a 1D ring algorithm in each dimension in turn”) — [Collective algorithms for multiported torus networks; Sack & Gropp (2015)]. Per-step α–β timing template is reused from the 1D Ring model — [L4, slide 34].
+- **Torus (2D) AllGather / ReduceScatter / Broadcast**:
+  `(nx-1) * ( (M/ny)/(nx*B) + alpha ) + (ny-1) * ( M/(ny*B) + alpha )`
+  — [L4, slide 34; Collective algorithms for multiported torus networks; Sack & Gropp (2015)].
+- **Torus (2D) AllReduce** (ReduceScatter + AllGather):
+  `2*(nx-1) * ( (M/ny)/(nx*B) + alpha ) + 2*(ny-1) * ( M/(ny*B) + alpha )`
+  — [L4, slide 34; Collective algorithms for multiported torus networks; Sack & Gropp (2015)].
+- **Torus (2D) All2All (two-phase approximation)**:
+  `T ≈ (nx-1) * ( (M/ny)/(nx*B) + alpha ) + (ny-1) * ( M/(ny*B) + alpha )`;
+  volume per GPU `V = 2*(N-1)*(M/N)` — [L7] (volume), timing template [L4, slide 34].
 - **Mesh (2D) AllReduce / AllGather / ReduceScatter / Broadcast** - [*Optimization of Collective Reduction Operations*, R. Rabenseifner et al. (2004)]  
 - **Mesh (2D) All2All** - [*Communication Analysis of Parallel 3D FFT for Flat Cartesian Meshes*, A. Chan et al. (2008)]
 
@@ -30,4 +41,5 @@ All formulas and conventions in this project are tied to the following sources. 
 
 - NVLink intra-node: ~900 GB/s, low latency — [L4, slide 16].
 - InfiniBand inter-node: ~50 GB/s per GPU — [L4, slide 16].
+
 
