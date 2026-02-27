@@ -74,8 +74,9 @@ class Config:
     seq_length: Optional[int] = None
     hidden_size: Optional[int] = None
     num_layers: Optional[int] = None
-    mesh_nx: Optional[int] = None
-    mesh_ny: Optional[int] = None
+    # Generic 2D grid dims (for mesh / torus): nx * ny == degree.
+    nx: Optional[int] = None
+    ny: Optional[int] = None
 
 @dataclass
 class CollectiveReport:
@@ -166,8 +167,8 @@ def analyze_config(
             B2=config.B2,
             alpha2=config.alpha2,
             gpus_per_node=config.gpus_per_node,
-            n_x=config.mesh_nx,
-            n_y=config.mesh_ny,
+            n_x=config.nx,
+            n_y=config.ny,
         )
         res = collective_latency_and_volume(
             CollectiveKind.ALL_REDUCE,
@@ -203,8 +204,8 @@ def analyze_config(
             B2=config.B2,
             alpha2=config.alpha2,
             gpus_per_node=config.gpus_per_node,
-            n_x=config.mesh_nx,
-            n_y=config.mesh_ny,
+            n_x=config.nx,
+            n_y=config.ny,
         )
         res = collective_latency_and_volume(
             CollectiveKind.ALL_REDUCE,
@@ -240,8 +241,8 @@ def analyze_config(
             B2=config.B2,
             alpha2=config.alpha2,
             gpus_per_node=config.gpus_per_node,
-            n_x=config.mesh_nx,
-            n_y=config.mesh_ny,
+            n_x=config.nx,
+            n_y=config.ny,
         )
         res = collective_latency_and_volume(
             CollectiveKind.ALL_TO_ALL,
