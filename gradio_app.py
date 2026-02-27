@@ -29,13 +29,14 @@ from comm_overhead import (
 )
 from comm_overhead.analyze import Config
 
-TOPOLOGY_CHOICES = ["ring", "tree", "hierarchical", "switch", "mesh"]
+TOPOLOGY_CHOICES = ["ring", "tree", "hierarchical", "switch", "mesh", "torus"]
 TOPOLOGY_MAP = {
     "ring": TopologyKind.RING,
     "tree": TopologyKind.TREE,
     "hierarchical": TopologyKind.HIERARCHICAL,
     "switch": TopologyKind.SWITCH,
     "mesh": TopologyKind.MESH,
+    "torus": TopologyKind.TORUS,
 }
 COLLECTIVE_CHOICES = ["ALL_REDUCE", "ALL_GATHER", "REDUCE_SCATTER", "BROADCAST", "ALL_TO_ALL"]
 COLLECTIVE_MAP = {
@@ -72,12 +73,33 @@ def _fmt(val, unit="", precision=4):
     return f"{val:.{precision}f} {unit}".strip()
 
 
+def _grid_dims_from_inputs(grid_nx, grid_ny, N, topology):
+    """
+    Parse n_x, n_y from UI; treat 0/None/empty as auto. Validate when both given.
+    Returns (nx, ny) for build_topology/Config; for mesh/torus both can be None (= auto).
+    """
+    try:
+        nx = int(float(grid_nx)) if grid_nx is not None and float(grid_nx) > 0 else None
+    except (TypeError, ValueError):
+        nx = None
+    try:
+        ny = int(float(grid_ny)) if grid_ny is not None and float(grid_ny) > 0 else None
+    except (TypeError, ValueError):
+        ny = None
+    if topology not in ("mesh", "torus"):
+        return None, None
+    if nx is not None and ny is not None:
+        if nx * ny != N:
+            raise ValueError(f"n_x × n_y must equal N (GPU count). Got n_x={nx}, n_y={ny}, N={N}. Leave both empty to auto-infer.")
+    return nx, ny
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  Tab 1 – Single Collective Operation
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def run_collective(
-    topology, collective_op, N, M_str, gpus_per_node, mesh_nx, mesh_ny,
+    topology, collective_op, N, M_str, gpus_per_node, grid_nx, grid_ny,
     tree_algo, verbose, selected_metrics,
 ):
     try:
@@ -86,9 +108,7 @@ def run_collective(
         M = float(M_str)
         N = int(N)
         gpn = int(gpus_per_node) if gpus_per_node else None
-        nx = int(mesh_nx) if mesh_nx else None
-        ny = int(mesh_ny) if mesh_ny else None
-
+        nx, ny = _grid_dims_from_inputs(grid_nx, grid_ny, N, topology)
         topo = build_topology(kind=topo_kind, N=N, gpus_per_node=gpn, n_x=nx, n_y=ny)
 
         verbose_output = ""
@@ -159,12 +179,14 @@ def run_collective(
 def run_analysis(
     topology, num_gpus, dp, tp, cp, params_str,
     batch_size, seq_length, hidden_size, num_layers,
-    gpus_per_node, mesh_nx, mesh_ny,
+    gpus_per_node, grid_nx, grid_ny,
     verbose, selected_metrics,
 ):
     try:
+        num_gpus_int = int(num_gpus)
+        nx, ny = _grid_dims_from_inputs(grid_nx, grid_ny, num_gpus_int, topology)
         config = Config(
-            num_gpus=int(num_gpus),
+            num_gpus=num_gpus_int,
             topology_kind=TOPOLOGY_MAP[topology],
             gpus_per_node=int(gpus_per_node) if gpus_per_node else None,
             dp_degree=int(dp),
@@ -175,8 +197,8 @@ def run_analysis(
             seq_length=int(seq_length) if seq_length else None,
             hidden_size=int(hidden_size) if hidden_size else None,
             num_layers=int(num_layers) if num_layers else None,
-            mesh_nx=int(mesh_nx) if mesh_nx else None,
-            mesh_ny=int(mesh_ny) if mesh_ny else None,
+            nx=nx,
+            ny=ny,
         )
         include_bd = "Memory Breakdown" in selected_metrics
 
@@ -357,12 +379,11 @@ def run_memory(params_str, show_breakdown):
 
 def update_topology_fields(topology):
     is_hierarchical = topology == "hierarchical"
-    is_mesh = topology == "mesh"
-    
+    is_2d_grid = topology in ("mesh", "torus")
     return (
-        gr.update(visible=is_hierarchical),  # coll_gpn
-        gr.update(visible=is_mesh),          # coll_nx
-        gr.update(visible=is_mesh),          # coll_ny
+        gr.update(visible=is_hierarchical),  # gpn
+        gr.update(visible=is_2d_grid),      # nx
+        gr.update(visible=is_2d_grid),       # ny
     )
 
 def update_operation_fields(operation):
@@ -390,8 +411,8 @@ def build_app():
                     coll_M = gr.Textbox(value="140e9", label="M (tensor size in bytes)")
                 with gr.Column(scale=1):
                     coll_gpn = gr.Number(value=None, label="GPUs per node (hierarchical only)", precision=0, visible=False)
-                    coll_nx = gr.Number(value=None, label="Mesh n_x (mesh only)", precision=0, visible=False)
-                    coll_ny = gr.Number(value=None, label="Mesh n_y (mesh only)", precision=0, visible=False)
+                    coll_nx = gr.Number(value=None, label="n_x (mesh & torus)", placeholder="auto if empty", precision=0, visible=False)
+                    coll_ny = gr.Number(value=None, label="n_y (mesh & torus)", placeholder="auto if empty", precision=0, visible=False)
                     coll_tree = gr.Checkbox(value=False, label="Use tree algorithm (AllReduce only)", visible=True)
                     coll_verbose = gr.Checkbox(value=False, label="Verbose (show formulas)")
 
@@ -440,8 +461,8 @@ def build_app():
                     ana_hidden = gr.Number(value=None, label="Hidden size (optional, needed for TP/CP)", precision=0)
                     ana_layers = gr.Number(value=None, label="Num layers (optional, for total comm/step)", precision=0)
                     ana_gpn = gr.Number(value=None, label="GPUs per node (hierarchical only)", precision=0, visible=False)
-                    ana_nx = gr.Number(value=None, label="Mesh n_x (mesh only)", precision=0, visible=False)
-                    ana_ny = gr.Number(value=None, label="Mesh n_y (mesh only)", precision=0, visible=False)
+                    ana_nx = gr.Number(value=None, label="n_x (mesh & torus)", placeholder="auto if empty", precision=0, visible=False)
+                    ana_ny = gr.Number(value=None, label="n_y (mesh & torus)", placeholder="auto if empty", precision=0, visible=False)
                     ana_verbose = gr.Checkbox(value=False, label="Verbose (show formulas)")
 
             ana_metrics = gr.CheckboxGroup(
