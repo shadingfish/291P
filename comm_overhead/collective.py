@@ -525,21 +525,27 @@ def _hierarchical_ring_allreduce(
         gpus_per_node: GPUs per node (e.g. 4 for 2 nodes x 4 GPUs). If None or 0,
                       fall back to simplified model: intra steps = N-1 (no node count).
 
-    Formula (Case 2, L5 slide): When gpus_per_node is set, intra steps use per-node count:
-      intra = (gpus_per_node - 1) * (M/(N*B1) + alpha1)   [within each node]
-      inter = M/(N*B2) + alpha2   [one pairwise step across nodes]
-      latency = 2 * (intra + inter)   [ReduceScatter phase + AllGather phase]
-    Source: L4 slide 38, L5 slide 4 (Recap on Ring-based All-Reduce on Hierarchical Topology).
+    Ring over nodes: inter_steps = (num_nodes - 1) per phase; inter = inter_steps * (M/(N*B2) + alpha2).
+    num_nodes = N / gpus_per_node. Source: L4 slide 38, L5 slide 4.
+
+    Note: Formulas assume N % gpus_per_node == 0 (uniform nodes). When N % g != 0,
+    we still use num_nodes = N // g; result is an approximation (last node may have fewer GPUs).
     """
     if gpus_per_node and gpus_per_node > 0:
         intra_steps = gpus_per_node - 1
+        num_nodes = N // gpus_per_node
+        inter_steps_per_phase = max(0, num_nodes - 1)
     else:
         intra_steps = N - 1
+        inter_steps_per_phase = 1  # Fallback when gpus_per_node unset
+
     intra = intra_steps * (M / (N * B1) + alpha1)
-    inter = M / (N * B2) + alpha2
+    time_inter_per_step = M / (N * B2) + alpha2
+    inter = inter_steps_per_phase * time_inter_per_step
+
     latency = 2 * (intra + inter)
-    steps = 2 * intra_steps + 2
-    volume_per_gpu = 2 * intra_steps * (M / N) + 2 * (M / N)
+    steps = 2 * intra_steps + 2 * inter_steps_per_phase
+    volume_per_gpu = 2 * intra_steps * (M / N) + 2 * inter_steps_per_phase * (M / N)
     return latency, volume_per_gpu, steps, 2 * intra, 2 * inter
 
 
@@ -555,19 +561,23 @@ def _hierarchical_ring_allgather_reducescatter(
     """
     Hierarchical AllGather or ReduceScatter: intra-node phase + inter-node phase.
 
-    Parameters (inputs): Same as _hierarchical_ring_allreduce; gpus_per_node optional.
-    When set: intra steps = (gpus_per_node - 1). Otherwise intra steps = (N - 1).
-    Formula: intra + inter. Source: L5 slide 4.
+    Same num_nodes logic as _hierarchical_ring_allreduce.
+    Note: Assumes N % gpus_per_node == 0; when not, num_nodes = N // g is an approximation.
     """
     if gpus_per_node and gpus_per_node > 0:
         intra_steps = gpus_per_node - 1
+        num_nodes = N // gpus_per_node
+        inter_steps = max(0, num_nodes - 1)
     else:
         intra_steps = N - 1
+        inter_steps = 1
+
     intra = intra_steps * (M / (N * B1) + alpha1)
-    inter = M / (N * B2) + alpha2
+    time_inter_per_step = M / (N * B2) + alpha2
+    inter = inter_steps * time_inter_per_step
     latency = intra + inter
-    steps = intra_steps + 1
-    volume_per_gpu = intra_steps * (M / N) + (M / N)
+    steps = intra_steps + inter_steps
+    volume_per_gpu = intra_steps * (M / N) + inter_steps * (M / N)
     return latency, volume_per_gpu, steps, intra, inter
 
 
@@ -583,19 +593,21 @@ def _hierarchical_all2all(
     """
     Hierarchical All2All: intra-node phase + inter-node phase.
 
-    Each GPU sends (N-1) chunks of M/N; (g-1) go to same-node peers, (N-g) to other nodes.
-    Intra: (g-1) steps, M/(N·B1)+α1 per step.
-    Inter: 1 step (pairwise, 2-node model), (N-g)·(M/N)/B2 + α2.
+    Each GPU sends (N-1) chunks of M/N; (g-1) to same-node peers, (N-g) to other nodes.
+    Ring over nodes: inter_steps = (num_nodes - 1); inter = inter_steps * (M/(N·B2) + α2).
 
     When gpus_per_node is not set, fall back to B2/alpha2-dominant model.
+    Note: Assumes N % gpus_per_node == 0; when not, num_nodes = N // g is an approximation.
     """
     volume_per_gpu = 2 * (N - 1) * (M / N)
     if gpus_per_node and gpus_per_node > 0:
         g = gpus_per_node
+        num_nodes = N // g
+        inter_steps = max(0, num_nodes - 1)
         intra = (g - 1) * (M / (N * B1) + alpha1)
-        inter = (N - g) * (M / N) / B2 + alpha2
+        inter = inter_steps * (M / (N * B2) + alpha2)
         latency = intra + inter
-        steps = (g - 1) + 1
+        steps = (g - 1) + inter_steps
         return latency, volume_per_gpu, steps, intra, inter
     else:
         # Fallback: B2/alpha2 dominant (no node count)
@@ -629,16 +641,20 @@ def _print_hierarchical_allreduce(
     M: float, N: int, B1: float, alpha1: float, B2: float, alpha2: float,
     gpus_per_node: Optional[int], intra: float, inter: float, lat: float,
 ) -> None:
-    """Print Hierarchical Ring AllReduce formula and calculation (L5 slide, Case 2)."""
+    """Print Hierarchical Ring AllReduce formula (L5 Case 2 or ring-over-nodes)."""
     intra_steps = (gpus_per_node - 1) if gpus_per_node and gpus_per_node > 0 else (N - 1)
     time_intra_one = M / (N * B1) + alpha1
     time_inter_one = M / (N * B2) + alpha2
     intra_one_phase = intra_steps * time_intra_one
-    print("  [Formula] Hierarchical Ring AllReduce (Case 2, L5 slide): 2*(intra + inter)")
+    if gpus_per_node and gpus_per_node > 0:
+        num_nodes = N // gpus_per_node
+        inter_steps = max(0, num_nodes - 1)
+        print(f"  [Formula] Hierarchical Ring AllReduce: 2*(intra + inter), {inter_steps} inter step(s)/phase (ring over {num_nodes} nodes)")
+    else:
+        print("  [Formula] Hierarchical Ring AllReduce (fallback): 2*(intra + inter)")
     print(f"  [Input]   N={N}, M={M:.2e} B, B1={B1:.2e} B/s, alpha1={alpha1:.2e} s, B2={B2:.2e} B/s, alpha2={alpha2:.2e} s, gpus_per_node={gpus_per_node}")
     print(f"  [Intra]   intra_steps = {intra_steps}; time_intra_per_step = M/(N*B1)+alpha1 = {time_intra_one:.4e} s; intra_one_phase = {intra_one_phase:.4e} s")
-    print(f"  [Inter]   time_inter = M/(N*B2)+alpha2 = {time_inter_one:.4e} s")
-    print(f"  [Phase]   ReduceScatter: intra + inter = {intra_one_phase:.4e} + {time_inter_one:.4e} = {intra_one_phase+time_inter_one:.4e} s; AllGather same => total intra = {intra:.4e} s, inter = {inter:.4e} s")
+    print(f"  [Inter]   time_inter_per_step = M/(N*B2)+alpha2 = {time_inter_one:.4e} s; total inter = {inter:.4e} s")
     print(f"  [Result] latency = 2*(intra+inter) = {lat:.4e} s ({lat*1000:.2f} ms)")
 
 
@@ -646,9 +662,13 @@ def _print_hierarchical_ag_rs(
     M: float, N: int, B1: float, alpha1: float, B2: float, alpha2: float,
     gpus_per_node: Optional[int], intra: float, inter: float, lat: float,
 ) -> None:
-    """Print Hierarchical AllGather/ReduceScatter formula (L5 slide 4)."""
+    """Print Hierarchical AllGather/ReduceScatter formula (L5 slide 4 or ring-over-nodes)."""
     intra_steps = (gpus_per_node - 1) if gpus_per_node and gpus_per_node > 0 else (N - 1)
-    print("  [Formula] Hierarchical AllGather/ReduceScatter: intra + inter (L5 slide 4)")
+    if gpus_per_node and gpus_per_node > 0:
+        num_nodes = N // gpus_per_node
+        print(f"  [Formula] Hierarchical AllGather/ReduceScatter: intra + inter (ring over {num_nodes} nodes)")
+    else:
+        print("  [Formula] Hierarchical AllGather/ReduceScatter: intra + inter")
     print(f"  [Input]   N={N}, gpus_per_node={gpus_per_node} => intra_steps={intra_steps}")
     print(f"  [Result] intra_latency = {intra:.4e} s, inter_latency = {inter:.4e} s, total = {lat:.4e} s ({lat*1000:.2f} ms)")
 

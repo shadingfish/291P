@@ -18,6 +18,8 @@ All formulas and conventions in this project are tied to the following sources. 
 - **Tree AllReduce latency**: `2*ceil(log2(N)) * (M/B + alpha)` — [L4, slide 36].
 - **Ring AllGather / ReduceScatter**: `(N-1) * (M/(N*B) + alpha)` — [L4, slide 34].
 - **Hierarchical Ring (2-level)**: Intra ReduceScatter + Inter reduction + Intra AllGather — [L4, slide 38]; formulas with B1/α1, B2/α2 — [L5, slide 4].
+  - **Ring over nodes**: inter_steps = (num_nodes - 1) per phase; inter = inter_steps × (M/(N·B2) + α2). Source: L4 slide 38, L5 slide 4.
+  - **N % gpus_per_node != 0**: Formulas assume uniform nodes; we use num_nodes = N // g as an approximation.
 - **Per-GPU memory (no ZeRO)**: 2·Ψ (weights) + 2·Ψ (gradients) + 12·Ψ (optimizer states) — [L5, slide 18].
 - **ZeRO-1/2/3** (for future extension): [L5, slides 21–26].
 - **Switch AllReduce latency: 2 * (M/B + alpha)** — [Derived from Star Topology baseline; see Derivations above].

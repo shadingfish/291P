@@ -279,7 +279,7 @@ def analyze_config(
     # Build summary string
     summary_parts = [
         f"GPUs: {config.num_gpus}, Topology: {config.topology_kind.value}",
-        f"Per-GPU memory (no ZeRO): {total_mem / (1024**3):.2f} GB",
+        f"Per-GPU memory (no ZeRO): {total_mem / 1e9:.2f} GB",
     ]
     if gpus_per_node is not None and gpus_per_node > 0:
         summary_parts.append(f"GPUs per node: {gpus_per_node}")
