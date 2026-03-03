@@ -393,6 +393,29 @@ def _ring_allgather_or_reducescatter_flat(M: float, N: int, B: float, alpha: flo
     volume_per_gpu = (N - 1) * (M / N)
     return latency, volume_per_gpu, steps
 
+
+def _ring_broadcast_flat(M: float, N: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """
+    Ring-style Broadcast (simplified): (N-1) steps, each step forwards the full tensor M.
+
+    This matches the lecture slide's row for Ring Broadcast:
+      Steps: N-1
+      Time per step: M/B + alpha
+      Latency: (N-1) * (M/B + alpha)
+      Volume per GPU: (N-1) * M  (root sends M, others forward M)
+
+    We model volume per GPU as (N-1)*M as an upper bound; in practice,
+    only root and intermediate GPUs send, but this bound is sufficient
+    for our comparative analysis.
+    """
+    if N <= 1:
+        return 0.0, 0.0, 0
+    steps = N - 1
+    time_per_step = M / B + alpha
+    latency = steps * time_per_step
+    volume_per_gpu = steps * M
+    return latency, volume_per_gpu, steps
+
 def _torus_dims(topology: TopologyDesc) -> Tuple[int, int]:
     """
     Get TORUS grid dims (n_x, n_y).
@@ -581,6 +604,42 @@ def _hierarchical_ring_allgather_reducescatter(
     return latency, volume_per_gpu, steps, intra, inter
 
 
+def _hierarchical_broadcast(
+    M: float,
+    N: int,
+    B1: float,
+    alpha1: float,
+    B2: float,
+    alpha2: float,
+    gpus_per_node: Optional[int] = None,
+) -> Tuple[float, float, int, float, float]:
+    """
+    Hierarchical Broadcast: intra-node phase + inter-node phase.
+
+    Model follows L5 hierarchical slide:
+      - Intra-node: (g-1) steps, each moving full payload M with cost M/B1 + alpha1.
+      - Inter-node: (k-1) steps across nodes (k = num_nodes), each with cost M/B2 + alpha2.
+
+    We report logical volume per GPU as M (each non-root receives one full copy;
+    root sends one full copy), matching the slide's Volume per GPU = M.
+    """
+    if gpus_per_node and gpus_per_node > 0:
+        g = gpus_per_node
+        intra_steps = g - 1
+        num_nodes = N // g
+        inter_steps = max(0, num_nodes - 1)
+    else:
+        # Fallback: treat as flat with interconnect B2/alpha2 dominant.
+        intra_steps = 0
+        inter_steps = N - 1
+
+    intra = intra_steps * (M / B1 + alpha1) if intra_steps > 0 else 0.0
+    inter = inter_steps * (M / B2 + alpha2) if inter_steps > 0 else 0.0
+    latency = intra + inter
+    steps = intra_steps + inter_steps
+    volume_per_gpu = M
+    return latency, volume_per_gpu, steps, intra, inter
+
 def _hierarchical_all2all(
     M: float,
     N: int,
@@ -593,13 +652,14 @@ def _hierarchical_all2all(
     """
     Hierarchical All2All: intra-node phase + inter-node phase.
 
-    Each GPU sends (N-1) chunks of M/N; (g-1) to same-node peers, (N-g) to other nodes.
-    Ring over nodes: inter_steps = (num_nodes - 1); inter = inter_steps * (M/(N·B2) + α2).
+    Each GPU sends (N-1) distinct chunks of size M/N in total; (g-1) to same-node peers,
+    (N-g) to other nodes. We model logical send volume per GPU as (N-1)*(M/N), consistent
+    with the flat ring-style All2All model and ignore extra forwarding hops.
 
     When gpus_per_node is not set, fall back to B2/alpha2-dominant model.
     Note: Assumes N % gpus_per_node == 0; when not, num_nodes = N // g is an approximation.
     """
-    volume_per_gpu = 2 * (N - 1) * (M / N)
+    volume_per_gpu = (N - 1) * (M / N)
     if gpus_per_node and gpus_per_node > 0:
         g = gpus_per_node
         num_nodes = N // g
@@ -911,7 +971,7 @@ def collective_latency_and_volume(
 
     if kind == CollectiveKind.BROADCAST:
         if topology.kind == TopologyKind.HIERARCHICAL:
-            lat, vol, st, intra, inter = _hierarchical_ring_allgather_reducescatter(
+            lat, vol, st, intra, inter = _hierarchical_broadcast(
                 M, N, B1, alpha1, B2, alpha2, gpus_per_node
             )
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st, intra_latency_s=intra, inter_latency_s=inter)
@@ -934,7 +994,7 @@ def collective_latency_and_volume(
             lat, vol, st = _mesh_broadcast(M, n_x, n_y, B, alpha)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         else:
-            lat, vol, st = _ring_allgather_or_reducescatter_flat(M, N, B, alpha)
+            lat, vol, st = _ring_broadcast_flat(M, N, B, alpha)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
 
     if kind == CollectiveKind.ALL_TO_ALL:
@@ -965,10 +1025,13 @@ def collective_latency_and_volume(
                 intra_latency_s=intra,
                 inter_latency_s=inter,
             )
-        # All2All: each GPU sends (N-1) chunks of size M/N, receives (N-1) chunks of size M/N.
-        # Input M = total tensor size (e.g. 4*S*h for Ulysses QKV). Volume per GPU = 2*(N-1)*M/N.
-        # Latency: simplified as volume_per_gpu / B + alpha*(N-1). Source: L7.
-        volume_per_gpu = 2 * (N - 1) * (M / N)
+        # Flat All2All (ring-style model):
+        # Each GPU has total payload M, logically split into N chunks of size M/N.
+        # It sends (N-1) distinct chunks to peers, so total logical send volume per GPU
+        # is (N-1) * (M/N). We ignore extra forwarding hops on intermediate GPUs.
+        # Latency uses the same α–β template as ring AG/RS: (N-1) * (M/(N*B) + α),
+        # which can be written as volume_per_gpu/B + alpha*(N-1).
+        volume_per_gpu = (N - 1) * (M / N)
         latency = volume_per_gpu / B + alpha * (N - 1)
         steps = N - 1
         return CollectiveResult(latency_s=latency, volume_bytes=volume_per_gpu, steps=steps)

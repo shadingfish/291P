@@ -149,6 +149,20 @@ def analyze_config(
         total_mem = mem_result
         breakdown = None
 
+    # Approximate tensor-parallel sharding of parameters: when tp_degree > 1,
+    # we assume the bulk of weights/gradients/optimizer states are sharded
+    # evenly across tp_degree GPUs within each DP group. This reduces the
+    # per-GPU parameter memory from ~16 * Psi to ~16 * Psi / tp_degree.
+    tp = max(config.tp_degree, 1)
+    if tp > 1:
+        total_mem /= tp
+        if breakdown is not None:
+            breakdown = MemoryBreakdown(
+                weights_bytes=breakdown.weights_bytes / tp,
+                gradients_bytes=breakdown.gradients_bytes / tp,
+                optimizer_bytes=breakdown.optimizer_bytes / tp,
+            )
+
     # DP, TP, CP can coexist (e.g. dp=4, tp=2, cp=2 on 16 GPUs). We call build_topology and
     # collective_latency_and_volume once per dimension because each has different N (degree),
     # collective kind (AllReduce vs All2All), and tensor size M.
@@ -229,8 +243,10 @@ def analyze_config(
     cp_latency_s: Optional[float] = None
     if config.cp_degree > 1 and config.seq_length is not None and config.hidden_size is not None:
         batch = config.batch_size or 1
-        # Total tensor size for All2All: Q,K,V (and often one more), 4 * batch * seq * hidden * 2 bytes.
-        M_cp = 4 * batch * config.seq_length * config.hidden_size * BYTES_FP16
+        # Total tensor size per GPU for All2All (Ulysses-style CP):
+        # Q,K,V plus output => 4 * (batch * seq/CP * hidden) * 2 bytes.
+        effective_seq = config.seq_length / config.cp_degree
+        M_cp = 4 * batch * effective_seq * config.hidden_size * BYTES_FP16
         cp_topology = build_topology(
             kind=config.topology_kind,
             N=config.cp_degree,
@@ -279,8 +295,10 @@ def analyze_config(
     # Build summary string
     summary_parts = [
         f"GPUs: {config.num_gpus}, Topology: {config.topology_kind.value}",
-        f"Per-GPU memory (no ZeRO): {total_mem / 1e9:.2f} GB",
+        f"Per-GPU memory (no ZeRO, TP-sharded): {total_mem / 1e9:.2f} GB",
     ]
+    if tp > 1:
+        summary_parts.append(f"TP degree: {tp}")
     if gpus_per_node is not None and gpus_per_node > 0:
         summary_parts.append(f"GPUs per node: {gpus_per_node}")
     if num_nodes is not None:

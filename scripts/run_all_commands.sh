@@ -31,11 +31,10 @@ echo ""
 echo "=== 2. Full analysis (DP=8, 70B) ==="
 python run_cli.py analysis --topology ring --num-gpus 8 --dp 8 --params 70e9
 python run_cli.py analysis --topology tree --num-gpus 8 --dp 8 --params 70e9
-python run_cli.py analysis --topology hierarchical --num-gpus 8 --dp 8 --params 70e9
 python run_cli.py analysis --topology hierarchical --num-gpus 8 --dp 8 --gpus-per-node 4 --params 70e9
 python run_cli.py analysis --topology switch --num-gpus 8 --dp 8 --params 70e9
-python run_cli.py analysis --topology torus --num-gpus 8 --dp 8 --params 70e9
-python run_cli.py analysis --topology mesh --num-gpus 8 --dp 8 --params 70e9
+python run_cli.py analysis --topology torus --num-gpus 8 --dp 8  --nx 2 --ny 4 --params 70e9
+python run_cli.py analysis --topology mesh --num-gpus 8 --dp 8  --nx 2 --ny 4 --params 70e9
 
 echo ""
 echo "=== 3. Memory only (no P): per-GPU memory for 70B ==="
