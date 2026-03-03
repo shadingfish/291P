@@ -15,12 +15,14 @@ SUPPORTED COMBINATIONS (collective_kind x topology_kind)
   ALL_REDUCE                 yes    yes*    yes            yes      yes    yes
   ALL_GATHER                 yes    no**    yes            yes      yes    yes
   REDUCE_SCATTER             yes    no**    yes            yes      yes    yes
-  BROADCAST                  yes    no**    yes            yes      yes    yes
+  BROADCAST                  yes    yes***  yes            yes      yes    yes
   ALL_TO_ALL                 yes    no**    yes***         yes      yes    yes
 
-  * TREE: AllReduce uses tree algorithm. Other collectives use ring-style formula.
-  ** TREE + non-AllReduce: ring-style formula (B, alpha), no dedicated tree algo.
-  *** HIERARCHICAL All2All: simplified (B2/alpha2 dominant).
+  * TREE: AllReduce uses tree algorithm (2*ceil(log2 N) steps).
+  ** TREE + AG/RS/All2All: ring-style formula (B, alpha), no dedicated tree algo.
+  *** TREE Broadcast: binary tree, ceil(log2 N) steps.
+  **** HIERARCHICAL All2All: intra (g-1 steps) + inter (1 step) when gpus_per_node set;
+       else B2/alpha2 dominant fallback.
   MESH: 2D grid (n_x * n_y = N); dimension-ordered ring (row then column). See
     _mesh_* helpers; source Rabenseifner ICCS 2004, Chan et al. HiPC 2008 (All2All).
 
@@ -149,6 +151,28 @@ def _tree_allreduce_flat(M: float, N: int, B: float, alpha: float) -> Tuple[floa
     time_per_step = M / B + alpha
     latency = steps * time_per_step
     volume_per_gpu = steps * M  # upper bound; tree exact volume is op-dependent
+    return latency, volume_per_gpu, steps
+
+
+def _tree_broadcast_flat(M: float, N: int, B: float, alpha: float) -> Tuple[float, float, int]:
+    """
+    Tree Broadcast: root sends to children, children forward down the binary tree.
+
+    Parameters (inputs):
+        M: Total tensor size in bytes. Root has M; all others receive M.
+        N: Number of GPUs (tree nodes).
+        B: Link bandwidth in bytes per second.
+        alpha: Per-step latency in seconds.
+
+    Formula: ceil(log2(N)) steps; each step time = M/B + alpha.
+    Source: NCCL binary tree broadcast; two-tree broadcast achieves O(log N) steps.
+    """
+    steps = int(math.ceil(math.log2(N))) if N > 1 else 0
+    if steps == 0:
+        return 0.0, 0.0, 0
+    time_per_step = M / B + alpha
+    latency = steps * time_per_step
+    volume_per_gpu = M  # each receiving GPU gets M; root sends M
     return latency, volume_per_gpu, steps
 
 
@@ -547,6 +571,39 @@ def _hierarchical_ring_allgather_reducescatter(
     return latency, volume_per_gpu, steps, intra, inter
 
 
+def _hierarchical_all2all(
+    M: float,
+    N: int,
+    B1: float,
+    alpha1: float,
+    B2: float,
+    alpha2: float,
+    gpus_per_node: Optional[int] = None,
+) -> Tuple[float, float, int, float, float]:
+    """
+    Hierarchical All2All: intra-node phase + inter-node phase.
+
+    Each GPU sends (N-1) chunks of M/N; (g-1) go to same-node peers, (N-g) to other nodes.
+    Intra: (g-1) steps, M/(N·B1)+α1 per step.
+    Inter: 1 step (pairwise, 2-node model), (N-g)·(M/N)/B2 + α2.
+
+    When gpus_per_node is not set, fall back to B2/alpha2-dominant model.
+    """
+    volume_per_gpu = 2 * (N - 1) * (M / N)
+    if gpus_per_node and gpus_per_node > 0:
+        g = gpus_per_node
+        intra = (g - 1) * (M / (N * B1) + alpha1)
+        inter = (N - g) * (M / N) / B2 + alpha2
+        latency = intra + inter
+        steps = (g - 1) + 1
+        return latency, volume_per_gpu, steps, intra, inter
+    else:
+        # Fallback: B2/alpha2 dominant (no node count)
+        latency = volume_per_gpu / B2 + alpha2 * (N - 1)
+        steps = N - 1
+        return latency, volume_per_gpu, steps, 0.0, latency
+
+
 def _print_ring_allreduce(M: float, N: int, B: float, alpha: float, lat: float, st: int) -> None:
     """Print Ring AllReduce formula and calculation (L4 slide 34)."""
     steps_rs, steps_ag = N - 1, N - 1
@@ -838,6 +895,9 @@ def collective_latency_and_volume(
                 M, N, B1, alpha1, B2, alpha2, gpus_per_node
             )
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st, intra_latency_s=intra, inter_latency_s=inter)
+        elif topology.kind == TopologyKind.TREE:
+            lat, vol, st = _tree_broadcast_flat(M, N, B, alpha)
+            return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
         elif topology.kind == TopologyKind.SWITCH:
             lat, vol, st = _switch_flat_model(M, N, B, alpha, kind.value)
             if verbose:
@@ -874,15 +934,22 @@ def collective_latency_and_volume(
             n_x, n_y = _require_mesh_dims(topology)
             lat, vol, st = _mesh_alltoall(M, n_x, n_y, B, alpha)
             return CollectiveResult(latency_s=lat, volume_bytes=vol, steps=st)
+        elif topology.kind == TopologyKind.HIERARCHICAL:
+            lat, vol, st, intra, inter = _hierarchical_all2all(
+                M, N, B1, alpha1, B2, alpha2, gpus_per_node
+            )
+            return CollectiveResult(
+                latency_s=lat,
+                volume_bytes=vol,
+                steps=st,
+                intra_latency_s=intra,
+                inter_latency_s=inter,
+            )
         # All2All: each GPU sends (N-1) chunks of size M/N, receives (N-1) chunks of size M/N.
         # Input M = total tensor size (e.g. 4*S*h for Ulysses QKV). Volume per GPU = 2*(N-1)*M/N.
         # Latency: simplified as volume_per_gpu / B + alpha*(N-1). Source: L7.
         volume_per_gpu = 2 * (N - 1) * (M / N)
-        if topology.kind == TopologyKind.HIERARCHICAL:
-            # Rough: assume one inter-node exchange dominates
-            latency = volume_per_gpu / B2 + alpha2 * (N - 1)
-        else:
-            latency = volume_per_gpu / B + alpha * (N - 1)
+        latency = volume_per_gpu / B + alpha * (N - 1)
         steps = N - 1
         return CollectiveResult(latency_s=latency, volume_bytes=volume_per_gpu, steps=steps)
 
