@@ -1,26 +1,4 @@
-"""
-Topology module: describes how GPUs are connected for communication.
-
-Inputs:  topology kind, number of GPUs N, bandwidth B (bytes/s), latency alpha (s).
-         For hierarchical: intra-node B1/alpha1, inter-node B2/alpha2.
-Outputs: TopologyDesc (passed to collective module to compute latency).
-
-Formula sources: Lecture 4 (Foundations), Lecture 5 (DP, hierarchical).
-See REFERENCES.md for full citation list.
-
------------------------------------------------------------------------------
-CONSTRAINTS WHEN USED WITH collective.py
------------------------------------------------------------------------------
-  - RING:  Used for all collectives. Supply N, B, alpha.
-  - TREE:  Only AllReduce uses a dedicated tree formula; other collectives
-           are computed as flat (ring-style) using B, alpha.
-  - HIERARCHICAL:  Must supply B1, alpha1, B2, alpha2. gpus_per_node is optional;
-           when set (e.g. 4 for 2 nodes x 4 GPUs), collective formulas use
-           (gpus_per_node - 1) intra steps per phase (Case 2, L5 slide); when None,
-           intra steps = (N - 1) (simplified model).
-  - TORUS: Requires N = n_x * n_y. If n_x/n_y not given, we infer a near-square grid.
-           (Collective formulas are in collective.py.)
-"""
+"""Topology parameter container for the communication cost model."""
 
 from dataclasses import dataclass
 from enum import Enum
@@ -47,21 +25,7 @@ class TopologyKind(str, Enum):
 
 @dataclass
 class TopologyDesc:
-    """
-    Description of the network topology for use by the collective module.
-
-    Attributes:
-        kind: One of RING, TREE, HIERARCHICAL.
-        N: Number of GPUs participating in the collective.
-        B: (Flat topologies) Link bandwidth in bytes per second.
-        alpha: (Flat topologies) Per-step latency in seconds.
-        B1: (Hierarchical) Intra-node bandwidth, bytes/s.
-        alpha1: (Hierarchical) Intra-node per-step latency, seconds.
-        B2: (Hierarchical) Inter-node bandwidth, bytes/s.
-        alpha2: (Hierarchical) Inter-node per-step latency, seconds.
-        gpus_per_node: (Hierarchical) GPUs per node; if None, assumed single node.
-        n_x, n_y: (Mesh) Mesh dimensions where n_x * n_y == N.
-    """
+    """Holds the network params that `collective.py` uses (depends on topology kind)."""
     kind: TopologyKind
     N: int
     B: float = 0.0
@@ -98,27 +62,7 @@ def build_topology(
     n_x: Optional[int] = None,
     n_y: Optional[int] = None,
 ) -> TopologyDesc:
-    """
-    Build a topology description from the given parameters.
-
-    Inputs:
-        kind: Topology type (RING, TREE, or HIERARCHICAL).
-        N: Number of GPUs.
-        B: (Flat) Bandwidth in bytes/s. Default: NVLink from constants.
-        alpha: (Flat) Latency in seconds. Default: LATENCY_NVLINK_S.
-        B1, alpha1: (Hierarchical) Intra-node bandwidth and latency. Default: NVLink.
-        B2, alpha2: (Hierarchical) Inter-node bandwidth and latency. Default: InfiniBand.
-        gpus_per_node: (Hierarchical) GPUs per node (e.g. 4 for 2 nodes x 4 GPUs).
-                       When set, collective uses (gpus_per_node - 1) intra steps;
-                       when None, uses (N - 1) for backward compatibility.
-
-    Outputs:
-        TopologyDesc to pass to collective_latency_and_volume().
-
-    References:
-        L4 slide 16 (NVLink ~900 GB/s, IB ~50 GB/s).
-        L4 slide 38, L5 slide 4 (hierarchical two-level formulas).
-    """
+    """Construct a `TopologyDesc` (flat vs hierarchical vs mesh/torus params)."""
     if kind == TopologyKind.HIERARCHICAL:
         desc = TopologyDesc(
             kind=kind,

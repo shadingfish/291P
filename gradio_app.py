@@ -1,13 +1,4 @@
-"""
-Gradio web UI for the Communication and Memory Overhead Tool.
-
-Launch:
-    cd 291P
-    pip install gradio
-    python gradio_app.py
-
-Then open the URL printed in the terminal (default http://127.0.0.1:7860).
-"""
+"""Gradio web UI for the Communication and Memory Overhead Tool."""
 
 import sys
 from io import StringIO
@@ -47,7 +38,6 @@ COLLECTIVE_MAP = {
     "ALL_TO_ALL": CollectiveKind.ALL_TO_ALL,
 }
 
-# ─── Metrics that the user can toggle ───────────────────────────────────────
 COLLECTIVE_METRICS = [
     "Latency (ms)",
     "Volume per GPU (GB)",
@@ -94,10 +84,6 @@ def _grid_dims_from_inputs(grid_nx, grid_ny, N, topology):
     return nx, ny
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Tab 1 – Single Collective Operation
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def run_collective(
     topology, collective_op, N, M_str, gpus_per_node, grid_nx, grid_ny,
     tree_algo, verbose, selected_metrics,
@@ -132,7 +118,6 @@ def run_collective(
         lines = []
         lines.append(f"## {collective_op} on {topology.upper()} (N={N})\n")
         
-        # Build table data
         table_rows = []
         if "Latency (ms)" in selected_metrics:
             table_rows.append(["Latency", _fmt(res.latency_s * 1000, 'ms')])
@@ -145,17 +130,13 @@ def run_collective(
         if "Inter-node latency (ms)" in selected_metrics and res.inter_latency_s is not None:
             table_rows.append(["Inter-node latency", _fmt(res.inter_latency_s * 1000, 'ms')])
         
-        # Generate markdown table
         if table_rows:
-            # Calculate column width for alignment (minimum 20 characters)
             max_label_width = max(max(len(row[0]) for row in table_rows), 20)
             max_value_width = max(max(len(row[1]) for row in table_rows), 15)
-            
-            # Table header (left-aligned)
+ 
             lines.append(f"| {'Metric':<{max_label_width}} | {'Value':<{max_value_width}} |")
             lines.append(f"|{'-' * (max_label_width + 2)}|{'-' * (max_value_width + 2)}|")
-            
-            # Table rows (left-aligned)
+
             for label, value in table_rows:
                 lines.append(f"| {label:<{max_label_width}} | {value:<{max_value_width}} |")
             lines.append("")
@@ -171,10 +152,6 @@ def run_collective(
     except Exception as e:
         return f"Error: {e}"
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Tab 2 – Full Analysis (DP / TP / CP + Memory)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def run_analysis(
     topology, num_gpus, dp, tp, cp, params_str,
@@ -253,21 +230,17 @@ def run_analysis(
                 lines.append(f"| {label:<{max_label_width}} | {value:<{max_value_width}} |")
             lines.append("")
         
-        # Collective Reports Table
         if "Collective Reports Table" in selected_metrics and result.collective_reports:
             lines.append("### Collective Reports\n")
-            
-            # Calculate column widths
+
             max_name_width = max(max(len(r.name) for r in result.collective_reports), 35)
             latency_width = 12
             steps_width = 6
             vol_width = 10
-            
-            # Table header
+
             lines.append(f"| {'Collective':<{max_name_width}} | {'Latency(ms)':>{latency_width}} | {'Steps':>{steps_width}} | {'Vol(GB)':>{vol_width}} | Details |")
             lines.append(f"|{'-' * (max_name_width + 2)}|{'-' * (latency_width + 2)}|{'-' * (steps_width + 2)}|{'-' * (vol_width + 2)}|---------|")
-            
-            # Table rows
+
             for r in result.collective_reports:
                 intra_str = ""
                 if r.intra_latency_s is not None:
@@ -288,10 +261,6 @@ def run_analysis(
     except Exception as e:
         return f"Error: {e}"
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Tab 3 – Run All (comparison table)
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def run_all_comparison():
     try:
@@ -322,8 +291,7 @@ def run_all_comparison():
                     inter = f"{res.inter_latency_s * 1000:.2f}" if res.inter_latency_s else ""
                     rows.append(["collective", topo_name, N, "", "" if gpn is None else gpn, latency, steps, intra, inter])
 
-        # rows.append(["", "", "", "", ""])
-        
+
         for topo_name, topo_kind in [
             ("ring", TopologyKind.RING),
             ("tree", TopologyKind.TREE),
@@ -344,10 +312,6 @@ def run_all_comparison():
     except Exception as e:
         return [[f"Error: {str(e)}", "", "", "", ""]]
 
-
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Tab 4 – Memory Only
-# ═══════════════════════════════════════════════════════════════════════════════
 
 def run_memory(params_str, show_breakdown):
     try:
@@ -373,10 +337,6 @@ def run_memory(params_str, show_breakdown):
         return [[f"Error: {str(e)}", "", ""]]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  Build the Gradio UI
-# ═══════════════════════════════════════════════════════════════════════════════
-
 def update_topology_fields(topology):
     is_hierarchical = topology == "hierarchical"
     is_2d_grid = topology in ("mesh", "torus")
@@ -401,7 +361,6 @@ def build_app():
             "Select a tab, configure parameters, **choose which metrics to display**, then click **Run**."
         )
 
-        # ─── Tab 1: Single Collective ────────────────────────────────────
         with gr.Tab("Single Collective"):
             with gr.Row():
                 with gr.Column(scale=1):
@@ -445,7 +404,6 @@ def build_app():
                 outputs=coll_output,
             )
 
-        # ─── Tab 2: Full Analysis ────────────────────────────────────────
         with gr.Tab("Full Analysis"):
             with gr.Row():
                 with gr.Column(scale=1):
@@ -495,7 +453,6 @@ def build_app():
                 outputs=ana_output,
             )
 
-        # ─── Tab 3: Memory Calculator ────────────────────────────────────
         with gr.Tab("Memory Calculator"):
             with gr.Row():
                 mem_params = gr.Textbox(value="70e9", label="Model parameters (e.g. 70e9 for 70B)")
@@ -513,7 +470,6 @@ def build_app():
                 outputs=mem_output,
             )
 
-        # ─── Tab 4: Run All (Comparison Table) ───────────────────────────
         with gr.Tab("Run All (Comparison)"):
             gr.Markdown(
                 "Run all predefined topology/config combinations and display a comparison table.\n"
@@ -522,7 +478,6 @@ def build_app():
             runall_btn = gr.Button("Run All", variant="primary", size="lg")
             runall_output = gr.Dataframe(
                 label="Comparison Table",
-                # headers=["Tag", "Latency(ms)", "Steps", "Intra(ms)", "Inter(ms)"],
                 headers=["Type", "Topology", "Number of GPUs", "DP Degree", "gpn", "Latency(ms)", "Steps", "Intra(ms)", "Inter(ms)"],
                 wrap=True,
             )
