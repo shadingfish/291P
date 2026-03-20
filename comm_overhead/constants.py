@@ -1,10 +1,3 @@
-"""
-Default constants for bandwidth, latency, and data types.
-
-Used across topology and collective modules when the user does not supply values.
-All formula sources are cited in REFERENCES.md and in the topology/collective modules.
-"""
-
 # -----------------------------------------------------------------------------
 # Bandwidth (bytes per second) — source: Lecture 4, slide 16
 # -----------------------------------------------------------------------------

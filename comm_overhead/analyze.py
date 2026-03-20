@@ -1,19 +1,3 @@
-"""
-Analyze module: orchestrate topology, collective, and memory for a given config.
-
-Inputs:  GPU count, topology params, parallelism degrees (DP/PP/TP/CP), model size,
-         optional batch/seq for TP/PP/CP communication sizing.
-Outputs: AnalysisResult with per-collective latencies, per-GPU memory, and summary.
-
-This module does not add new formulas; it calls topology, collective, and memory
-with parameters derived from the config. References are in those modules.
-
-Used by:
-  - example_usage.py: analyze_config(), Config, AnalysisResult for full config analysis.
-  - comm_overhead/__init__.py: re-exports analyze_config, AnalysisResult, Config.
-  - Any script that does: from comm_overhead import analyze_config, Config; analyze_config(Config(...))
-"""
-
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
 
@@ -29,33 +13,6 @@ from comm_overhead.constants import BYTES_FP16
 
 @dataclass
 class Config:
-    """
-    Input configuration for analyze_config().
-
-    Attributes:
-        num_gpus: Total number of GPUs.
-        topology_kind: RING, TREE, or HIERARCHICAL.
-        B: (Flat) Bandwidth bytes/s. Optional.
-        alpha: (Flat) Latency seconds. Optional.
-        B1, alpha1, B2, alpha2, gpus_per_node: (Hierarchical) Optional.
-        dp_degree: Data parallelism degree. Default 1.
-            USED: When > 1, we compute one DP gradient AllReduce over dp_degree GPUs
-            (tensor size M = num_parameters * 2 bytes).
-        pp_degree: Pipeline parallelism degree. Default 1.
-            NOT USED in basic version (PP P2P communication not computed).
-        tp_degree: Tensor parallelism degree. Default 1.
-            USED: When > 1 and hidden_size/seq_length are set, we compute one TP
-            per-layer AllReduce over tp_degree GPUs (tensor size from batch*seq*hidden).
-        cp_degree: Context parallelism degree. Default 1.
-            USED: When > 1 and seq_length/hidden_size are set, we compute one CP
-            All2All over cp_degree GPUs (tensor size M from batch*seq*hidden, QKV-style).
-        num_parameters: Model parameter count (e.g. 70e9).
-        batch_size: Global batch size (optional, for TP/PP activation sizing).
-        seq_length: Sequence length (optional, for TP/CP sizing).
-        hidden_size: Hidden dimension (optional, for TP per-layer tensor size).
-        num_layers: Number of transformer layers (optional). When set, used to compute
-            a combined "total communication time per step" (DP once + num_layers * (TP + CP)).
-    """
     num_gpus: int
     topology_kind: TopologyKind = TopologyKind.RING
     B: Optional[float] = None
@@ -82,32 +39,25 @@ class Config:
 
 @dataclass
 class CollectiveReport:
-    """One collective's result for reporting."""
     name: str
     latency_s: float
     volume_bytes: float
     steps: int
     tensor_size_M_bytes: float
     intra_latency_s: Optional[float] = None
-    """(Hierarchical only) Intra-node phase time, seconds."""
     inter_latency_s: Optional[float] = None
-    """(Hierarchical only) Inter-node phase time, seconds."""
 
 
 @dataclass
 class AnalysisResult:
-    """Output of analyze_config(): all communication and memory results."""
     per_gpu_memory_bytes: float
     memory_breakdown: Optional[MemoryBreakdown] = None
     collective_reports: List[CollectiveReport] = field(default_factory=list)
     dp_allreduce_latency_s: Optional[float] = None
     summary: str = ""
     gpus_per_node: Optional[int] = None
-    """When topology is HIERARCHICAL and set: GPUs per node."""
     num_nodes: Optional[int] = None
-    """When gpus_per_node is set: num_gpus // gpus_per_node."""
     total_comm_time_per_step_upper_bound_s: Optional[float] = None
-    """When DP+TP+CP coexist and num_layers is set: DP once + num_layers*(TP + CP). No overlap."""
 
 
 def analyze_config(
@@ -115,29 +65,6 @@ def analyze_config(
     include_memory_breakdown: bool = True,
     verbose: bool = False,
 ) -> AnalysisResult:
-    """
-    Analyze communication and memory for the given config (basic version, no ZeRO).
-
-    Inputs:
-        config: Config with num_gpus, topology, parallelism degrees, num_parameters,
-                and optional batch_size/seq_length/hidden_size for TP/PP/CP.
-        include_memory_breakdown: If True, include weight/grad/optimizer breakdown.
-
-    Outputs:
-        AnalysisResult with:
-          - per_gpu_memory_bytes: From memory module (ZeRO-0).
-          - memory_breakdown: Optional weights/grads/optimizer bytes.
-          - collective_reports: List of CollectiveReport for each collective computed.
-          - dp_allreduce_latency_s: Latency of one DP gradient AllReduce (if DP > 1).
-          - summary: Short human-readable summary.
-
-    Logic:
-        - Build topology from config (N = num_gpus, B/alpha or B1/alpha1/B2/alpha2).
-        - DP: One AllReduce per step for gradients; tensor size M = num_parameters * 2 (FP16).
-        - TP: Per-layer AllReduce when tp_degree > 1.
-        - CP: Per-layer All2All when cp_degree > 1 (sequence-dimension exchange, L7).
-        - PP: P2P when pp_degree > 1 (not yet implemented).
-    """
     reports: List[CollectiveReport] = []
 
     # Per-GPU memory (no ZeRO). Source: L5 slide 18.
