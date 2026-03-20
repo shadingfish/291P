@@ -1,60 +1,3 @@
-"""
-Collective communication module: latency and volume for each collective op.
-
-Inputs:  collective kind, tensor size M (bytes), topology description.
-Outputs: latency (seconds), total communication volume (bytes), number of steps.
-
-All formulas are from lecture slides; each formula is cited in a comment.
-See REFERENCES.md.
-
------------------------------------------------------------------------------
-SUPPORTED COMBINATIONS (collective_kind x topology_kind)
------------------------------------------------------------------------------
-  Implemented:
-                            RING    TREE    HIERARCHICAL(RING ONLY)   SWITCH   MESH   TORUS
-  ALL_REDUCE                 yes    yes*    yes            yes      yes    yes
-  ALL_GATHER                 yes    no**    yes            yes      yes    yes
-  REDUCE_SCATTER             yes    no**    yes            yes      yes    yes
-  BROADCAST                  yes    no**    yes            yes      yes    yes
-  ALL_TO_ALL                 yes    no**    yes***         yes      yes    yes
-
-  * TREE: AllReduce uses tree algorithm. Other collectives use ring-style formula.
-  ** TREE + non-AllReduce: ring-style formula (B, alpha), no dedicated tree algo.
-  *** HIERARCHICAL All2All: simplified (B2/alpha2 dominant).
-  MESH: 2D grid (n_x * n_y = N); dimension-ordered ring (row then column). See
-    _mesh_* helpers; source Rabenseifner ICCS 2004, Chan et al. HiPC 2008 (All2All).
-
-  Planned:
-  - TORUS: mesh with wrap-around; same collective algorithms as mesh with
-    different step counts or contention model.
-
------------------------------------------------------------------------------
-HIERARCHICAL: per-node topology
------------------------------------------------------------------------------
-  Current: Intra-node is always RING (steps = gpus_per_node - 1 or N - 1).
-  Keep "intra-node = Ring only" for simplicity and alignment
-  with L4/L5 slides.
-  Can Optionally allow a future parameter intra_node_topology
-  (e.g. RING | TREE) so that within each node we use that topology's formula
-  for the same collective; then HIERARCHICAL would support e.g. "Ring within
-  node, Ring across nodes" (current) or "Tree within node, Ring across nodes".
-  Not required for basic version.
-
------------------------------------------------------------------------------
-CONSTRAINTS (topology <-> collective)
------------------------------------------------------------------------------
-  1. algorithm: Only applies to ALL_REDUCE and only when topology is flat
-     (RING or TREE). Ignored for HIERARCHICAL (always hierarchical ring).
-  2. HIERARCHICAL: Requires B1, alpha1, B2, alpha2. If gpus_per_node is set (e.g. 4),
-     intra-node steps use (gpus_per_node - 1) per phase (Case 2, L5 slide); otherwise
-     intra steps = (N - 1) (simplified model without node count).
-  3. TREE topology: Only ALL_REDUCE has a distinct tree formula. All other
-     collectives with TREE topology are computed with ring-style flat formula
-     (same as RING), using B and alpha from TopologyDesc.
-  4. ALL_TO_ALL: For HIERARCHICAL we use B2/alpha2 only (inter-node phase
-     assumed to dominate). Flat uses B and alpha.
-"""
-
 import math
 from dataclasses import dataclass
 from enum import Enum
@@ -64,23 +7,10 @@ from comm_overhead.topology import TopologyDesc, TopologyKind
 
 
 # -----------------------------------------------------------------------------
-# Input: collective operation type
+# input: collective operation type
 # -----------------------------------------------------------------------------
 
 class CollectiveKind(str, Enum):
-    """
-    Collective operation types. Extensible (e.g. add REDUCE, SCAN later).
-
-    - ALL_REDUCE:  Every GPU has a buffer of size M; after the op, every GPU has
-                   the same reduced value (e.g. sum). Used for gradient sync in DP.
-    - ALL_GATHER:  Each GPU has one chunk of size M/N; after the op, every GPU has
-                   all chunks concatenated (full size M). Used in ZeRO to gather weights.
-    - REDUCE_SCATTER: Reduce (e.g. sum) across GPUs, then scatter so each GPU has
-                      one chunk of the result. Used in ZeRO gradient phase.
-    - BROADCAST:     One GPU (root) has buffer M; after the op, every GPU has a copy.
-    - ALL_TO_ALL:   Each GPU sends a distinct chunk to every other GPU. Used in CP
-                    (e.g. Ulysses) for sequence-dimension exchange.
-    """
     ALL_REDUCE = "all_reduce"
     ALL_GATHER = "all_gather"
     REDUCE_SCATTER = "reduce_scatter"
@@ -89,39 +19,19 @@ class CollectiveKind(str, Enum):
 
 
 # -----------------------------------------------------------------------------
-# Output: result of one collective
+# output: result of one collective
 # -----------------------------------------------------------------------------
 
 @dataclass
 class CollectiveResult:
-    """Output of collective_latency_and_volume."""
     latency_s: float
-    """Total wall-clock time for the collective in seconds."""
     volume_bytes: float
-    """Bytes sent (or sent+received) per GPU for this collective."""
     steps: int
-    """Number of communication steps (e.g. ring has 2*(N-1) for AllReduce)."""
     intra_latency_s: Optional[float] = None
-    """(Hierarchical only) Time spent in intra-node phase(s), seconds."""
     inter_latency_s: Optional[float] = None
-    """(Hierarchical only) Time spent in inter-node phase(s), seconds."""
 
 
 def _ring_allreduce_flat(M: float, N: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """
-    Ring AllReduce = ReduceScatter + AllGather.
-
-    Parameters (inputs):
-        M: Total tensor size in bytes. Each GPU holds a buffer of this size before
-           and after the op (e.g. gradient buffer = num_parameters * 2 for FP16).
-        N: Number of GPUs in the ring.
-        B: Link bandwidth in bytes per second (e.g. NVLink ~900e9). Each step
-           transfers M/N bytes over one link.
-        alpha: Per-step latency in seconds (e.g. few microseconds). Added once per step.
-
-    Formula: 2*(N-1) steps; each step time = M/(N*B) + alpha.
-    Source: L4 slide 34.
-    """
     steps = 2 * (N - 1)
     time_per_step = M / (N * B) + alpha
     latency = steps * time_per_step
@@ -131,18 +41,6 @@ def _ring_allreduce_flat(M: float, N: int, B: float, alpha: float) -> Tuple[floa
 
 
 def _tree_allreduce_flat(M: float, N: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """
-    Tree AllReduce: reduce up the tree, then broadcast down.
-
-    Parameters (inputs):
-        M: Tensor size in bytes. In tree algorithm, each step can move up to M bytes.
-        N: Number of GPUs (tree leaves).
-        B: Link bandwidth in bytes per second.
-        alpha: Per-step latency in seconds.
-
-    Formula: 2*ceil(log2(N)) steps; each step time = M/B + alpha.
-    Source: L4 slide 36.
-    """
     steps = 2 * int(math.ceil(math.log2(N))) if N > 1 else 0
     if steps == 0:
         return 0.0, 0.0, 0
@@ -153,50 +51,18 @@ def _tree_allreduce_flat(M: float, N: int, B: float, alpha: float) -> Tuple[floa
 
 
 def _switch_flat_model(M: float, N: int, B: float, alpha: float, kind: str) -> Tuple[float, float, int]:
-    """
-    Switch Topology: Ideal Full-Bisection Non-blocking Model.
-
-    Assumes a centralized switch where every GPU has a dedicated link of bandwidth B.
-    Communication is modeled based on logical phases rather than hop-by-hop forwarding.
-
-    Parameters (inputs):
-        M: Total tensor size in bytes.
-        N: Number of GPUs connected to the switch.
-        B: Link bandwidth per GPU in bytes per second.
-        alpha: Per-step (round-trip/handshake) latency in seconds.
-        kind: The collective operation type (string value of CollectiveKind).
-
-    Formulas:
-        - AllReduce: 2 logical steps (Reduce-to-Root + Broadcast).
-          latency = 2 * (M/B + alpha).
-        - All2All: N-1 steps to handle distinct chunks for each peer.
-          latency = M/B + (N-1) * alpha.
-        - Others (AG/RS/Broadcast): 1 logical step of parallel transfer.
-          latency = M/B + alpha.
-
-    Source: Idealized Full-Bisection Model (Task 1 Specification).
-    """
     if N <= 1:
         return 0.0, 0.0, 0
 
     if kind == "all_reduce":
-        # Two logical phases: aggregate to switch/root, then distribute.
-        # Formula: latency = 2 * (M/B + alpha)
-        # Source: NCCL Star-Algorithm Model; aligns with L4 Slide 43 (Low Latency Strength).
         steps = 2
         latency = 2 * (M / B + alpha)
-        # Volume: 2 * (N-1)/N * M to align with Ring cargo definitions.
         volume = 2 * ((N - 1) / N) * M
     elif kind == "all_to_all":
-        # Each GPU logically serializes connection overhead for N-1 peers.
-        # Formula: latency = M/B + (N-1) * alpha
-        # Source: DeepSpeed-Ulysses: System Optimizations for Enabling Training of Extremely Long Sequence Transformers" (2023
         steps = N - 1
         latency = (M / B) + (N - 1) * alpha
         volume = 2 * ((N - 1) / N) * M
     else:
-        # AllGather, ReduceScatter, and Broadcast take 1 parallel round.
-        # Thakur et al. "Optimization of Collective Communication Operations in MPICH." (2005)
         steps = 1
         latency = (M / B) + alpha
         volume = ((N - 1) / N) * M
@@ -205,7 +71,6 @@ def _switch_flat_model(M: float, N: int, B: float, alpha: float, kind: str) -> T
 
 
 def _require_mesh_dims(topology: TopologyDesc) -> tuple[int, int]:
-    """Return (n_x, n_y) for MESH; fallback to near-square if n_x/n_y missing."""
     if topology.n_x is not None and topology.n_y is not None and topology.n_x > 0 and topology.n_y > 0 and topology.n_x * topology.n_y == topology.N:
         return int(topology.n_x), int(topology.n_y)
     from comm_overhead.topology import _default_mesh_dims
@@ -213,19 +78,6 @@ def _require_mesh_dims(topology: TopologyDesc) -> tuple[int, int]:
 
 
 def _mesh_allreduce(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """2D Mesh AllReduce via dimension-ordered Ring: RS(row) + AR(col on chunk) + AG(row).
-
-    Latency:
-      t = 2*(n_y-1) * (M/(n_y*B) + alpha) + 2*(n_x-1) * (M/(N*B) + alpha)
-
-    Volume per GPU:
-      v = 2*(n_y-1) * (M/n_y) + 2*(n_x-1) * (M/N)
-
-    Source:
-      R. Rabenseifner, "Optimization of Collective Reduction Operations",
-      ICCS 2004.
-      (AllReduce = ReduceScatter + AllGather; 2D mesh obtained via dimension-wise composition.)
-    """
     N = n_x * n_y
     if N <= 1:
         return 0.0, 0.0, 0
@@ -240,19 +92,6 @@ def _mesh_allreduce(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tup
 
 
 def _mesh_allgather(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """2D Mesh AllGather via dimension order: AG(col on M/n_y) + AG(row on M).
-
-    Latency:
-      t = (n_x-1) * (M/(N*B) + alpha) + (n_y-1) * (M/(n_y*B) + alpha)
-
-    Volume per GPU:
-      v = (n_x-1) * (M/N) + (n_y-1) * (M/n_y)
-
-    Source:
-      R. Rabenseifner, "Optimization of Collective Reduction Operations",
-      ICCS 2004.
-      (Ring AllGather used as building block; extended via dimension-wise composition.)
-    """
     N = n_x * n_y
     if N <= 1:
         return 0.0, 0.0, 0
@@ -267,19 +106,6 @@ def _mesh_allgather(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tup
 
 
 def _mesh_reducescatter(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """2D Mesh ReduceScatter via dimension order: RS(row on M) + RS(col on M/n_y).
-
-    Latency:
-      t = (n_y-1) * (M/(n_y*B) + alpha) + (n_x-1) * (M/(N*B) + alpha)
-
-    Volume per GPU:
-      v = (n_y-1) * (M/n_y) + (n_x-1) * (M/N)
-
-    Source:
-      R. Rabenseifner, "Optimization of Collective Reduction Operations",
-      ICCS 2004.
-      (Ring ReduceScatter building block composed across mesh dimensions.)
-    """
     N = n_x * n_y
     if N <= 1:
         return 0.0, 0.0, 0
@@ -294,20 +120,6 @@ def _mesh_reducescatter(M: float, n_x: int, n_y: int, B: float, alpha: float) ->
 
 
 def _mesh_broadcast(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """2D Mesh Broadcast in two phases: along one dimension, then the other.
-
-    Latency:
-      t = (n_y-1) * (M/(n_y*B) + alpha) + (n_x-1) * (M/(n_x*B) + alpha)
-
-    Volume per GPU:
-      Use an average/upper-bound proxy matching the two ring phases:
-      v = (n_y-1) * (M/n_y) + (n_x-1) * (M/n_x)
-
-    Source:
-      R. Rabenseifner, "Optimization of Collective Reduction Operations",
-      ICCS 2004.
-      (Broadcast modeled using the same α-β cost framework and dimension-wise decomposition.)
-    """
     N = n_x * n_y
     if N <= 1:
         return 0.0, 0.0, 0
@@ -322,20 +134,6 @@ def _mesh_broadcast(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tup
 
 
 def _mesh_alltoall(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """2D Mesh All2All via two local All2All phases: rows then columns.
-
-    Latency:
-      t = [2*(n_y-1)*M/n_y]/B + alpha*(n_y-1)
-        + [2*(n_x-1)*M/n_x]/B + alpha*(n_x-1)
-
-    Volume per GPU:
-      v = 2*(n_y-1)*M/n_y + 2*(n_x-1)*M/n_x
-
-    Source:
-      A. Chan, P. Balaji, W. Gropp, R. Thakur, "Communication Analysis of Parallel 3D FFT for Flat Cartesian Meshes",
-      HiPC 2008.
-      (Row/column All-to-All, a.k.a. pencil transpose.)
-    """
     N = n_x * n_y
     if N <= 1:
         return 0.0, 0.0, 0
@@ -350,135 +148,72 @@ def _mesh_alltoall(M: float, n_x: int, n_y: int, B: float, alpha: float) -> Tupl
 
 
 def _ring_allgather_or_reducescatter_flat(M: float, N: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """
-    Ring AllGather or ReduceScatter: (N-1) steps, each step moves M/N bytes.
-
-    Parameters (inputs):
-        M: Total tensor size in bytes (full buffer size for AllGather result, or
-           total reduced size for ReduceScatter input).
-        N: Number of GPUs.
-        B: Link bandwidth in bytes per second.
-        alpha: Per-step latency in seconds.
-
-    Formula: (N-1) * (M/(N*B) + alpha).
-    Source: L4 slide 34.
-    """
     steps = N - 1
     time_per_step = M / (N * B) + alpha
     latency = steps * time_per_step
     volume_per_gpu = (N - 1) * (M / N)
     return latency, volume_per_gpu, steps
 
+_TORUS_PORTS_PER_PHASE = 2
 def _torus_dims(topology: TopologyDesc) -> Tuple[int, int]:
-    """
-    Get TORUS grid dims (n_x, n_y).
-
-    TopologyDesc was constructed by build_topology(), which sets n_x/n_y.
-    """
     if topology.n_x is None or topology.n_y is None:
         raise ValueError("TORUS requires n_x and n_y to be set (expected from build_topology()).")
     return topology.n_x, topology.n_y
 
 def _torus_allreduce_flat(M: float, N: int, nx: int, ny: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """
-    TORUS AllReduce (2D) modeled as dimension-ordered bucket AllReduce:
-    ReduceScatter + AllGather across X (rows), then across Y (columns).
-
-    Model:
-      - Use 1D Ring step-time template (α–β): time_per_step = payload/(k*B) + alpha
-        where k = the group size along that dimension.
-        Source: L4 slide 34.
-      - Dimension-ordered view:
-        Source: [Collective algorithms for multiported torus networks; Sack & Gropp (2015)].
-
-    Convention:
-      N = nx * ny. M is the full tensor size (bytes).
-
-    Bucket phase sizing:
-      - X phase (row group size nx): total tensor within a row = M/ny.
-      - Y phase (column group size ny): after X, each rank holds a row-block (size M/ny);
-        the column AllReduce then operates on total tensor size M.
-
-    Formula (AllReduce = 2 phases, each uses Ring AllReduce steps):
-      latency =
-        2*(nx-1) * ( (M/ny)/(nx*B) + alpha )
-      + 2*(ny-1) * ( M/(ny*B) + alpha )
-
-      steps = 2*(nx-1) + 2*(ny-1)
-
-    Volume:
-      volume_per_gpu = 2*(N-1)*(M/N)
-    """
     if N <= 1:
         return 0.0, 0.0, 0
-    lat_x = 2 * (nx - 1) * ((M / ny) / (nx * B) + alpha)
-    lat_y = 2 * (ny - 1) * (M / (ny * B) + alpha)
+
+    B_eff = _TORUS_PORTS_PER_PHASE * B  # = 2B
+
+    lat_x = 2 * (nx - 1) * ((M / ny) / (nx * B_eff) + alpha)
+
+    lat_y = 2 * (ny - 1) * (M / (ny * B_eff) + alpha)
+
     latency = lat_x + lat_y
     steps = 2 * (nx - 1) + 2 * (ny - 1)
-    volume_per_gpu = 2 * (N - 1) * (M / N)
+
+    # volume per GPU:
+    # X phase: 2*(nx-1) steps, each sends (M/ny)/nx = M/N
+    # Y phase: 2*(ny-1) steps, each sends M/ny
+    volume_per_gpu = 2 * (nx - 1) * (M / N) + 2 * (ny - 1) * (M / ny)
+
     return latency, volume_per_gpu, steps
 
 def _torus_ringstyle_flat(M: float, N: int, nx: int, ny: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """
-    TORUS AllGather / ReduceScatter / Broadcast modeled as 2D dimension-ordered
-    ring-style collective: X phase then Y phase.
-
-    We reuse ring-style (N-1) step model:
-      Ring-style latency(k, payload) = (k-1) * ( payload/(k*B) + alpha )
-    Source basis: L4 slide 34 (Ring AllGather / ReduceScatter).
-
-    Payload approximation:
-      X phase payload ~= M/ny, group size nx
-      Y phase payload ~= M/nx, group size ny
-
-    Total:
-      latency = (nx-1)*((M/ny)/(nx*B)+alpha) + (ny-1)*((M/nx)/(ny*B)+alpha)
-      steps   = (nx-1) + (ny-1)
-
-    Volume:
-      volume_per_gpu = (N-1)*(M/N)
-    """
     if N <= 1:
         return 0.0, 0.0, 0
 
-    lat_x = (nx - 1) * ((M / ny) / (nx * B) + alpha)
-    lat_y = (ny - 1) * ((M / nx) / (ny * B) + alpha)
+    B_eff = _TORUS_PORTS_PER_PHASE * B  # = 2B
+
+    lat_x = (nx - 1) * ((M / ny) / (nx * B_eff) + alpha)
+    lat_y = (ny - 1) * (M / (ny * B_eff) + alpha)
     latency = lat_x + lat_y
 
     steps = (nx - 1) + (ny - 1)
 
-    volume_per_gpu = (N - 1) * (M / N)
+    # volume per GPU:
+    # X phase: (nx-1) steps, each sends (M/ny)/nx = M/N
+    # Y phase: (ny-1) steps, each sends M/ny
+    volume_per_gpu = (nx - 1) * (M / N) + (ny - 1) * (M / ny)
+
     return latency, volume_per_gpu, steps
 
 
 def _torus_all2all_flat(M: float, N: int, nx: int, ny: int, B: float, alpha: float) -> Tuple[float, float, int]:
-    """
-    TORUS All2All modeled as a 2-phase (X then Y) approximation.
-
-    Convention:
-      N = nx * ny. M is the full tensor size (bytes).
-
-    Timing approximation (dimension-ordered, bucket-like phases):
-      T \approx (nx-1) * ( (M/ny)/(nx*B) + alpha ) + (ny-1) * ( M/(ny*B) + alpha )
-
-    References:
-      - All2All volume/context: L7.
-      - Per-step α–β timing template reused from 1D ring-style: L4 slide 34.
-      - Dimension-ordered multi-dim communication is a common closed-form approximation.
-
-    Volume per GPU:
-      volume_per_gpu = 2*(N-1)*(M/N)
-    """
     if N <= 1:
         return 0.0, 0.0, 0
 
-    lat_x = (nx - 1) * ((M / ny) / (nx * B) + alpha)
-    lat_y = (ny - 1) * (M / (ny * B) + alpha)
+    B_eff = _TORUS_PORTS_PER_PHASE * B  # = 2B
 
+    lat_x = (nx - 1) * ((M / ny) / (nx * B_eff) + alpha)
+    lat_y = (ny - 1) * (M / (ny * B_eff) + alpha)
     latency = lat_x + lat_y
+
     steps = (nx - 1) + (ny - 1)
 
     volume_per_gpu = 2 * (N - 1) * (M / N)
+
     return latency, volume_per_gpu, steps
 
 def _hierarchical_ring_allreduce(
@@ -490,23 +225,6 @@ def _hierarchical_ring_allreduce(
     alpha2: float,
     gpus_per_node: Optional[int] = None,
 ) -> Tuple[float, float, int]:
-    """
-    Hierarchical Ring AllReduce (two-level: intra-node then inter-node).
-
-    Parameters (inputs):
-        M: Total tensor size in bytes (same meaning as flat Ring).
-        N: Total number of GPUs across all nodes.
-        B1, alpha1: Intra-node bandwidth and latency.
-        B2, alpha2: Inter-node bandwidth and latency.
-        gpus_per_node: GPUs per node (e.g. 4 for 2 nodes x 4 GPUs). If None or 0,
-                      fall back to simplified model: intra steps = N-1 (no node count).
-
-    Formula (Case 2, L5 slide): When gpus_per_node is set, intra steps use per-node count:
-      intra = (gpus_per_node - 1) * (M/(N*B1) + alpha1)   [within each node]
-      inter = M/(N*B2) + alpha2   [one pairwise step across nodes]
-      latency = 2 * (intra + inter)   [ReduceScatter phase + AllGather phase]
-    Source: L4 slide 38, L5 slide 4 (Recap on Ring-based All-Reduce on Hierarchical Topology).
-    """
     if gpus_per_node and gpus_per_node > 0:
         intra_steps = gpus_per_node - 1
     else:
@@ -528,13 +246,6 @@ def _hierarchical_ring_allgather_reducescatter(
     alpha2: float,
     gpus_per_node: Optional[int] = None,
 ) -> Tuple[float, float, int]:
-    """
-    Hierarchical AllGather or ReduceScatter: intra-node phase + inter-node phase.
-
-    Parameters (inputs): Same as _hierarchical_ring_allreduce; gpus_per_node optional.
-    When set: intra steps = (gpus_per_node - 1). Otherwise intra steps = (N - 1).
-    Formula: intra + inter. Source: L5 slide 4.
-    """
     if gpus_per_node and gpus_per_node > 0:
         intra_steps = gpus_per_node - 1
     else:
@@ -548,7 +259,6 @@ def _hierarchical_ring_allgather_reducescatter(
 
 
 def _print_ring_allreduce(M: float, N: int, B: float, alpha: float, lat: float, st: int) -> None:
-    """Print Ring AllReduce formula and calculation (L4 slide 34)."""
     steps_rs, steps_ag = N - 1, N - 1
     time_per = M / (N * B) + alpha
     print("  [Formula] Ring AllReduce = ReduceScatter + AllGather (L4 slide 34)")
@@ -558,7 +268,6 @@ def _print_ring_allreduce(M: float, N: int, B: float, alpha: float, lat: float, 
 
 
 def _print_tree_allreduce(M: float, N: int, B: float, alpha: float, lat: float, st: int) -> None:
-    """Print Tree AllReduce formula and calculation (L4 slide 36)."""
     from math import ceil, log2
     steps = 2 * int(ceil(log2(N))) if N > 1 else 0
     time_per = M / B + alpha if steps else 0
@@ -572,7 +281,6 @@ def _print_hierarchical_allreduce(
     M: float, N: int, B1: float, alpha1: float, B2: float, alpha2: float,
     gpus_per_node: Optional[int], intra: float, inter: float, lat: float,
 ) -> None:
-    """Print Hierarchical Ring AllReduce formula and calculation (L5 slide, Case 2)."""
     intra_steps = (gpus_per_node - 1) if gpus_per_node and gpus_per_node > 0 else (N - 1)
     time_intra_one = M / (N * B1) + alpha1
     time_inter_one = M / (N * B2) + alpha2
@@ -589,7 +297,6 @@ def _print_hierarchical_ag_rs(
     M: float, N: int, B1: float, alpha1: float, B2: float, alpha2: float,
     gpus_per_node: Optional[int], intra: float, inter: float, lat: float,
 ) -> None:
-    """Print Hierarchical AllGather/ReduceScatter formula (L5 slide 4)."""
     intra_steps = (gpus_per_node - 1) if gpus_per_node and gpus_per_node > 0 else (N - 1)
     print("  [Formula] Hierarchical AllGather/ReduceScatter: intra + inter (L5 slide 4)")
     print(f"  [Input]   N={N}, gpus_per_node={gpus_per_node} => intra_steps={intra_steps}")
@@ -597,7 +304,6 @@ def _print_hierarchical_ag_rs(
 
 
 def _print_switch_info(kind: str, M: float, N: int, B: float, alpha: float, lat: float, st: int) -> None:
-    """Print Switch Ideal model formula and calculation."""
     print(f"  [Formula] Switch {kind.capitalize()} (Ideal Full-Bisection Model)")
     print(f"  [Input]   N={N}, M={M:.2e} B, B={B:.2e} B/s, alpha={alpha:.2e} s")
 
@@ -614,24 +320,24 @@ def _print_switch_info(kind: str, M: float, N: int, B: float, alpha: float, lat:
 def _print_torus_allreduce(
     M: float, N: int, nx: int, ny: int, B: float, alpha: float, lat: float, st: int
 ) -> None:
-    """Print TORUS AllReduce formula and calculation (dimension-ordered; L4 slide 34; Sack & Gropp 2015)."""
     payload_x = M / ny
-    t_step_x = payload_x / (nx * B) + alpha
+    B_eff = _TORUS_PORTS_PER_PHASE * B
+    t_step_x = payload_x / (nx * B_eff) + alpha
     steps_x = 2 * (nx - 1)
     lat_x = steps_x * t_step_x
 
     payload_y = M
-    t_step_y = payload_y / (ny * B) + alpha
+    t_step_y = payload_y / (ny * B_eff) + alpha
     steps_y = 2 * (ny - 1)
     lat_y = steps_y * t_step_y
 
-    print("  [Formula] TORUS AllReduce (bucket, X then Y) (L4 slide 34; Sack & Gropp 2015)")
-    print(f"  [Input]   N={N} (nx={nx}, ny={ny}), M={M:.2e} B, B={B:.2e} B/s, alpha={alpha:.2e} s")
+    print("  [Formula]  TORUS AllReduce (bucket, X then Y) (L4 slide 34; Sack & Gropp 2015; multiport B_eff=4B)")
+    print(f"  [Input]   N={N} (nx={nx}, ny={ny}), M={M:.2e} B, B={B:.2e} B/s, B_eff={B_eff:.2e} B/s, alpha={alpha:.2e} s")
     print(f"  [X]       steps_x = 2*(nx-1) = {steps_x}; total_x = M/ny = {payload_x:.2e} B")
-    print(f"            time_x_per_step = total_x/(nx*B)+alpha = {payload_x/(nx*B):.4e} + {alpha:.2e} = {t_step_x:.4e} s")
+    print(f"            time_x_per_step = total_x/(nx*B_eff)+alpha = {payload_x/(nx*B_eff):.4e} + {alpha:.2e} = {t_step_x:.4e} s")
     print(f"            lat_x = {lat_x:.4e} s ({lat_x*1000:.2f} ms)")
     print(f"  [Y]       steps_y = 2*(ny-1) = {steps_y}; total_y = M = {payload_y:.2e} B")
-    print(f"            time_y_per_step = total_y/(ny*B)+alpha = {payload_y/(ny*B):.4e} + {alpha:.2e} = {t_step_y:.4e} s")
+    print(f"            time_y_per_step = total_y/(ny*B_eff)+alpha = {payload_y/(ny*B_eff):.4e} + {alpha:.2e} = {t_step_y:.4e} s")
     print(f"            lat_y = {lat_y:.4e} s ({lat_y*1000:.2f} ms)")
     print(f"  [Total]   steps = {steps_x}+{steps_y} = {st}; latency = {lat:.4e} s ({lat*1000:.2f} ms)")
 
@@ -639,24 +345,25 @@ def _print_torus_allreduce(
 def _print_torus_ringstyle(
     kind: str, M: float, N: int, nx: int, ny: int, B: float, alpha: float, lat: float, st: int
 ) -> None:
-    """Print TORUS ring-style (AG/RS/Broadcast) formula and calculation (bucket; L4 slide 34; Sack & Gropp 2015)."""
+    B_eff = _TORUS_PORTS_PER_PHASE * B
+
     payload_x = M / ny
-    t_step_x = payload_x / (nx * B) + alpha
+    t_step_x = payload_x / (nx * B_eff) + alpha
     steps_x = nx - 1
     lat_x = steps_x * t_step_x
 
     payload_y = M
-    t_step_y = payload_y / (ny * B) + alpha
+    t_step_y = payload_y / (ny * B_eff) + alpha
     steps_y = ny - 1
     lat_y = steps_y * t_step_y
 
-    print(f"  [Formula] TORUS {kind} (bucket, X then Y) (L4 slide 34; Sack & Gropp 2015)")
-    print(f"  [Input]   N={N} (nx={nx}, ny={ny}), M={M:.2e} B, B={B:.2e} B/s, alpha={alpha:.2e} s")
+    print(f"  [Formula] TORUS {kind} (bucket, X then Y) (L4 slide 34; Sack & Gropp 2015; multiport B_eff=4B)")
+    print(f"  [Input]   N={N} (nx={nx}, ny={ny}), M={M:.2e} B, B={B:.2e} B/s, B_eff={B_eff:.2e} B/s, alpha={alpha:.2e} s")
     print(f"  [X]       steps_x = nx-1 = {steps_x}; total_x = M/ny = {payload_x:.2e} B")
-    print(f"            time_x_per_step = total_x/(nx*B)+alpha = {payload_x/(nx*B):.4e} + {alpha:.2e} = {t_step_x:.4e} s")
+    print(f"            time_x_per_step = total_x/(nx*B_eff)+alpha = {payload_x/(nx*B_eff):.4e} + {alpha:.2e} = {t_step_x:.4e} s")
     print(f"            lat_x = {lat_x:.4e} s ({lat_x*1000:.2f} ms)")
     print(f"  [Y]       steps_y = ny-1 = {steps_y}; total_y = M = {payload_y:.2e} B")
-    print(f"            time_y_per_step = total_y/(ny*B)+alpha = {payload_y/(ny*B):.4e} + {alpha:.2e} = {t_step_y:.4e} s")
+    print(f"            time_y_per_step = total_y/(ny*B_eff)+alpha = {payload_y/(ny*B_eff):.4e} + {alpha:.2e} = {t_step_y:.4e} s")
     print(f"            lat_y = {lat_y:.4e} s ({lat_y*1000:.2f} ms)")
     print(f"  [Total]   steps = {steps_x}+{steps_y} = {st}; latency = {lat:.4e} s ({lat*1000:.2f} ms)")
 
@@ -664,25 +371,28 @@ def _print_torus_ringstyle(
 def _print_torus_all2all(
     M: float, N: int, nx: int, ny: int, B: float, alpha: float, lat: float, st: int
 ) -> None:
-    """Print TORUS All2All two-phase approximation (L7 volume; timing template L4 slide 34)."""
+
+    B_eff = _TORUS_PORTS_PER_PHASE * B
+
     payload_x = M / ny
-    t_step_x = payload_x / (nx * B) + alpha
+    t_step_x = payload_x / (nx * B_eff) + alpha
     steps_x = nx - 1
     lat_x = steps_x * t_step_x
 
     payload_y = M
-    t_step_y = payload_y / (ny * B) + alpha
+    t_step_y = payload_y / (ny * B_eff) + alpha
     steps_y = ny - 1
     lat_y = steps_y * t_step_y
+
     volume_per_gpu = 2 * (N - 1) * (M / N)
 
-    print("  [Formula] TORUS All2All ≈ X-phase + Y-phase (L7 volume; timing template L4 slide 34)")
-    print(f"  [Input]   N={N} (nx={nx}, ny={ny}), M={M:.2e} B, B={B:.2e} B/s, alpha={alpha:.2e} s")
+    print("  [Formula] TORUS All2All ≈ X-phase + Y-phase (L7 volume; timing template L4 slide 34; multiport B_eff=4B)")
+    print(f"  [Input]   N={N} (nx={nx}, ny={ny}), M={M:.2e} B, B={B:.2e} B/s, B_eff={B_eff:.2e} B/s, alpha={alpha:.2e} s")
     print(f"  [X]       steps_x = nx-1 = {steps_x}; total_x = M/ny = {payload_x:.2e} B")
-    print(f"            time_x_per_step = total_x/(nx*B)+alpha = {payload_x/(nx*B):.4e} + {alpha:.2e} = {t_step_x:.4e} s")
+    print(f"            time_x_per_step = total_x/(nx*B_eff)+alpha = {payload_x/(nx*B_eff):.4e} + {alpha:.2e} = {t_step_x:.4e} s")
     print(f"            lat_x = {lat_x:.4e} s ({lat_x*1000:.2f} ms)")
     print(f"  [Y]       steps_y = ny-1 = {steps_y}; total_y = M = {payload_y:.2e} B")
-    print(f"            time_y_per_step = total_y/(ny*B)+alpha = {payload_y/(ny*B):.4e} + {alpha:.2e} = {t_step_y:.4e} s")
+    print(f"            time_y_per_step = total_y/(ny*B_eff)+alpha = {payload_y/(ny*B_eff):.4e} + {alpha:.2e} = {t_step_y:.4e} s")
     print(f"            lat_y = {lat_y:.4e} s ({lat_y*1000:.2f} ms)")
     print(f"  [Total]   steps = {steps_x}+{steps_y} = {st}; latency = {lat:.4e} s ({lat*1000:.2f} ms)")
     print(f"  [Volume]  volume_per_gpu = 2*(N-1)*(M/N) = {volume_per_gpu:.2e} B ({volume_per_gpu/1e9:.2f} GB)")
@@ -694,69 +404,6 @@ def collective_latency_and_volume(
     algorithm: Optional[str] = None,
     verbose: bool = False,
 ) -> CollectiveResult:
-    """
-    Compute latency (s), communication volume (bytes), and step count for one collective.
-
-    ----------
-    Input parameters (detailed)
-    ----------
-
-    kind : CollectiveKind
-        Which collective to compute.
-        - ALL_REDUCE:  Gradient sync in DP; each GPU has buffer M, all get the same sum.
-        - ALL_GATHER:  Gather sharded data (e.g. ZeRO weights); input M/N per GPU, output M.
-        - REDUCE_SCATTER:  Reduce then scatter (e.g. ZeRO gradient phase).
-        - BROADCAST:  One root sends buffer M to all others.
-        - ALL_TO_ALL:  Each GPU sends/receives chunks; used in CP (Ulysses). M = total
-                       tensor size involved (e.g. 4*S*h for attention buffers).
-
-    M : float
-        Tensor size in bytes. Interpretation by op:
-        - AllReduce / Broadcast:  size of the buffer on each GPU (e.g. gradient =
-          num_parameters * 2 for FP16). Same M before and after.
-        - AllGather / ReduceScatter:  total size of the full tensor (so each chunk is M/N).
-        - All2All:  total size of the tensor being exchanged; each GPU sends (N-1)*(M/N) bytes.
-        Example: 70B params, FP16 gradient -> M = 70e9 * 2 = 140e9 bytes.
-
-    topology : TopologyDesc
-        From build_topology(). Supplies:
-        - N:  number of GPUs participating in this collective.
-        - For RING/TREE:  B (bytes/s) and alpha (seconds) for each link.
-        - For HIERARCHICAL:  B1/alpha1 (intra-node, e.g. NVLink), B2/alpha2 (inter-node,
-          e.g. InfiniBand). Used to compute per-step time = data/B + alpha.
-
-    algorithm : Optional[str]
-        Only used for ALL_REDUCE on flat topology. "ring" (default) or "tree".
-        Ring: more steps, less data per step (good for large M). Tree: fewer steps,
-        more data per step (good for small M or latency-sensitive).
-
-    ----------
-    Outputs (CollectiveResult)
-    ----------
-
-    latency_s : float
-        Total wall-clock time in seconds for the collective.
-    volume_bytes : float
-        Bytes sent (and optionally received) per GPU for this collective.
-    steps : int
-        Number of communication steps (e.g. ring AllReduce has 2*(N-1)).
-
-    ----------
-    Variable reference
-    ----------
-
-    N  = number of GPUs (from topology.N).
-    B  = link bandwidth in bytes per second (flat topology).
-    alpha = per-step latency in seconds (flat topology).
-    B1, alpha1 = intra-node bandwidth and latency (hierarchical).
-    B2, alpha2 = inter-node bandwidth and latency (hierarchical).
-
-    References:
-        L4 slide 34 (Ring AllReduce, AllGather, ReduceScatter).
-        L4 slide 36 (Tree AllReduce).
-        L4 slide 38, L5 slide 4 (hierarchical).
-        L7 (All2All volume; we use a simple model here).
-    """
     N = topology.N
     if N <= 0:
         return CollectiveResult(latency_s=0.0, volume_bytes=0.0, steps=0)

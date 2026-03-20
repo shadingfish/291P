@@ -1,15 +1,3 @@
-"""
-Communication and memory overhead tool for collaborative operations.
-
-Modules (each can be developed/extended by different owners):
-  - topology: Ring, Tree, Hierarchical topology descriptions
-  - collective: AllReduce, AllGather, ReduceScatter, Broadcast, All2All latency/volume
-  - memory: Per-GPU memory (basic: no ZeRO)
-  - analyze: Orchestrates topology + collective + memory for a given config
-
-See README.md for project structure and extension guide.
-"""
-
 from comm_overhead.topology import (
     TopologyKind,
     TopologyDesc,

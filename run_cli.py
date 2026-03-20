@@ -44,7 +44,6 @@ def _topology(s: str) -> TopologyKind:
 
 
 def cmd_collective(args) -> None:
-    """Run one AllReduce with given topology and N."""
     topo = build_topology(
         kind=_topology(args.topology),
         N=args.N,
@@ -68,7 +67,6 @@ def cmd_collective(args) -> None:
 
 
 def cmd_analysis(args) -> None:
-    """Run full analyze_config with Config from CLI."""
     config = Config(
         num_gpus=args.num_gpus,
         topology_kind=_topology(args.topology),
@@ -103,7 +101,6 @@ def cmd_analysis(args) -> None:
 
 
 def list_cmds() -> None:
-    """Print all suggested commands for horizontal comparison."""
     base = "PYTHONPATH=. python run_cli.py"
     M = "140e9"
     print("# Usage: list-cmds prints commands; run-all runs them as a table.")
@@ -156,7 +153,6 @@ def list_cmds() -> None:
 
 
 def run_all() -> None:
-    """Run all predefined combinations and print a comparison table."""
     M = 140e9
     rows = []
 
