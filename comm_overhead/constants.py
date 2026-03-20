@@ -8,8 +8,8 @@ All formula sources are cited in REFERENCES.md and in the topology/collective mo
 # -----------------------------------------------------------------------------
 # Bandwidth (bytes per second) — source: Lecture 4, slide 16
 # -----------------------------------------------------------------------------
-# NVLink within a node: bidirectional ~900 GB/s per GPU
-BANDWIDTH_NVLINK_GBPS = 900.0
+# NVLink within a node: bidirectional ~450 GB/s per GPU
+BANDWIDTH_NVLINK_GBPS = 450.0
 BANDWIDTH_NVLINK_BPS = BANDWIDTH_NVLINK_GBPS * (1024**3)
 
 # InfiniBand (or similar) across nodes: ~50 GB/s per GPU

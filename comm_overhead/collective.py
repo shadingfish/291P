@@ -143,6 +143,9 @@ def _tree_allreduce_flat(M: float, N: int, B: float, alpha: float) -> Tuple[floa
         alpha: Per-step latency in seconds.
 
     Formula: 2*ceil(log2(N)) steps; each step time = M/B + alpha.
+    For volume we approximate that each GPU sends/receives at most ~2 full
+    buffers M over the entire AllReduce (one for reduce phase, one for
+    broadcast phase), so we use volume_per_gpu ≈ 2*M rather than steps*M.
     Source: L4 slide 36.
     """
     steps = 2 * int(math.ceil(math.log2(N))) if N > 1 else 0
@@ -150,7 +153,8 @@ def _tree_allreduce_flat(M: float, N: int, B: float, alpha: float) -> Tuple[floa
         return 0.0, 0.0, 0
     time_per_step = M / B + alpha
     latency = steps * time_per_step
-    volume_per_gpu = steps * M  # upper bound; tree exact volume is op-dependent
+    # Approximate per-GPU volume: up to one M in reduce phase + one M in broadcast.
+    volume_per_gpu = 2 * M
     return latency, volume_per_gpu, steps
 
 
